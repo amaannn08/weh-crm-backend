@@ -27,13 +27,13 @@ jobs:
 
       - name: Create deployment package (backend only, no node_modules)
         run: |
-          tar --exclude="node_modules" --exclude=".git" --exclude="deploy.tar.gz" -czf deploy.tar.gz .
+          tar --exclude="node_modules" --exclude=".git" -czf /tmp/deploy.tar.gz .
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: backend-deployment-package
-          path: deploy.tar.gz
+          path: /tmp/deploy.tar.gz
           retention-days: 1
 
   deploy:
