@@ -17,7 +17,6 @@ initSchema()
   .catch((err) => {
     console.error('Schema init error:', err)
   })
-
 app.use(express.json())
 app.get('/health', (req, res) => res.status(200).send('ok'));
 app.use((req, res, next) => {
