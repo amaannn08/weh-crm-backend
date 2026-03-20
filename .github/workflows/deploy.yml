@@ -129,7 +129,7 @@ jobs:
 
           for i in {1..2}; do
             echo "Attempt $i of 5..."
-            response=$(curl -s -o /dev/null -w "%{http_code}" http://${EC2_HOST}:3000/health || echo "000")
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://${EC2_HOST}/health || echo "000")
 
             if [ "$response" = "200" ] || [ "$response" = "301" ] || [ "$response" = "302" ]; then
               echo "✅ Deployment successful! App is responding with status: $response"
