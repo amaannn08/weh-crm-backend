@@ -1,0 +1,40 @@
+{
+  "name": "crm-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "ingest": "node pipelines/localIngestion.js",
+    "ingest:drive": "node pipelines/driveIngestion.js",
+    "ingest:deals": "node scripts/ingestDealsOnce.js",
+    "clear:deals": "node scripts/clearDeals.js",
+    "clear:meetings": "node scripts/clearDeals.js --meetings",
+    "import:deal-meetings": "node scripts/importDealMeetingsFromCsv.js",
+    "backfill:founder-scores": "node scripts/backfillFounderScores.js",
+    "repair:nan-founder-scores": "node scripts/repairNaNFounderScores.js",
+    "repair:unknown-companies": "node scripts/repairUnknownCompanyNames.js",
+    "repair:blank-poc": "node scripts/repairBlankPoc.js",
+    "merge:duplicates": "node scripts/mergeDuplicateDeals.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@google/genai": "^1.44.0",
+    "@neondatabase/serverless": "^0.10.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "googleapis": "^144.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.11.0",
+    "multer": "^2.1.1",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
