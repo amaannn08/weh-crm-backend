@@ -19,7 +19,7 @@ initSchema()
   })
 
 app.use(express.json())
-
+app.get('/health', (req, res) => res.send('ok'));
 app.use((req, res, next) => {
   const origin = process.env.CORS_ORIGIN ?? '*'
   res.setHeader('Access-Control-Allow-Origin', origin)

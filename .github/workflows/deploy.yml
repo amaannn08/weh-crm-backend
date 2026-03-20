@@ -1,0 +1,186 @@
+name: Deploy backend to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Backend
+    runs-on: ubuntu-latest
+
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.13.1"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Create deployment package (backend only, no node_modules)
+        run: |
+          tar --exclude="node_modules" --exclude=".git" --exclude="deploy.tar.gz" -czf deploy.tar.gz .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-deployment-package
+          path: deploy.tar.gz
+          retention-days: 1
+
+  deploy:
+    name: Deploy to EC2
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-deployment-package
+
+      - name: Deploy to EC2 via SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          echo "$SSH_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+
+          # Copy deployment package to EC2
+          scp -i private_key.pem -o StrictHostKeyChecking=no \
+            deploy.tar.gz ${EC2_USERNAME}@${EC2_HOST}:/tmp/
+
+          # SSH into EC2 and deploy
+          ssh -i private_key.pem -o StrictHostKeyChecking=no \
+            ${EC2_USERNAME}@${EC2_HOST} << 'EOF'
+            set -e
+
+            APP_DIR=/var/www/express-app
+
+            # Ensure app directory exists
+            sudo mkdir -p "$APP_DIR"
+            sudo chown -R $USER:$USER "$APP_DIR"
+
+            cd "$APP_DIR"
+
+            # Backup current version (if any)
+            if [ -f "package.json" ]; then
+              timestamp=$(date +%Y%m%d_%H%M%S)
+              mkdir -p backups
+              tar -czf backups/backup_${timestamp}.tar.gz . 2>/dev/null || true
+              # Keep only last 5 backups
+              ls -t backups/backup_*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm
+            fi
+
+            # Extract new version (overwrites files)
+            echo "Extracting new deployment package..."
+            tar --overwrite -xzf /tmp/deploy.tar.gz -C "$APP_DIR"
+            rm /tmp/deploy.tar.gz
+
+            sudo chown -R $USER:$USER "$APP_DIR"
+
+            echo ""
+            echo "Installing production dependencies..."
+            npm ci --omit=dev
+
+            # Create default .env only if it does not exist
+            if [ ! -f .env ]; then
+              echo "Creating default .env file (edit with real values)..."
+              echo "NODE_ENV=production" > .env
+              echo "PORT=3000" >> .env
+            fi
+
+            mkdir -p logs
+
+            # Cleanup legacy process named 'index' if it exists to avoid port conflicts
+            pm2 stop index > /dev/null 2>&1 || true
+            pm2 delete index > /dev/null 2>&1 || true
+
+            # Start / reload with PM2 (app name: weh-backend)
+            if pm2 describe weh-backend > /dev/null 2>&1; then
+              echo "Reloading PM2 app (weh-backend)..."
+              pm2 reload weh-backend
+            else
+              echo "Starting new PM2 process (weh-backend)..."
+              pm2 start server.js --name weh-backend
+            fi
+
+            pm2 save
+          EOF
+
+          rm private_key.pem
+
+      - name: Verify deployment
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        run: |
+          echo "Waiting for application to start..."
+          sleep 10
+
+          for i in {1..2}; do
+            echo "Attempt $i of 5..."
+            response=$(curl -s -o /dev/null -w "%{http_code}" http://${EC2_HOST}:3000/health || echo "000")
+
+            if [ "$response" = "200" ] || [ "$response" = "301" ] || [ "$response" = "302" ]; then
+              echo "✅ Deployment successful! App is responding with status: $response"
+              exit 0
+            fi
+
+            echo "Got response: $response, waiting 5 seconds..."
+            sleep 5
+          done
+
+          echo "❌ Deployment verification failed after 2 attempts"
+          echo "Please check PM2 logs on the server"
+          exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
+          SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          echo "🔄 Attempting to rollback to previous version..."
+
+          echo "$SSH_PRIVATE_KEY" > private_key.pem
+          chmod 600 private_key.pem
+
+          ssh -i private_key.pem -o StrictHostKeyChecking=no \
+            ${EC2_USERNAME}@${EC2_HOST} << 'EOF'
+            set -e
+
+            APP_DIR=/var/www/express-app
+            cd "$APP_DIR"
+
+            sudo chown -R $USER:$USER "$APP_DIR"
+
+            latest_backup=$(ls -t backups/backup_*.tar.gz 2>/dev/null | head -1 || true)
+
+            if [ -n "$latest_backup" ]; then
+              echo "Found backup: $latest_backup"
+              tar -xzf "$latest_backup" -C "$APP_DIR"
+              npm ci --omit=dev
+              if pm2 describe weh-backend > /dev/null 2>&1; then
+                pm2 reload weh-backend
+              else
+                pm2 start server.js --name weh-backend
+              fi
+              pm2 save
+              echo "✅ Rolled back to previous version"
+            else
+              echo "⚠️ No backup found, cannot rollback"
+            fi
+          EOF
+
+          rm private_key.pem
