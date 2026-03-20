@@ -19,7 +19,7 @@ initSchema()
   })
 
 app.use(express.json())
-app.get('/health', (req, res) => res.send('ok'));
+app.get('/health', (req, res) => res.status(200).send('ok'));
 app.use((req, res, next) => {
   const origin = process.env.CORS_ORIGIN ?? '*'
   res.setHeader('Access-Control-Allow-Origin', origin)
@@ -42,6 +42,6 @@ app.use('/conversations', authMiddleware, conversationRoutes)
 app.use('/deals', authMiddleware, dealsRoutes)
 app.use('/meetings', authMiddleware, meetingsRoutes)
 
-app.listen(PORT,'0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on http://localhost:${PORT}`)
 })
