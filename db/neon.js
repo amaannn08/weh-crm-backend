@@ -21,6 +21,13 @@ export function sql(strings, ...values) {
 }
 
 export const poolRef = pool
+export async function query(text, params) {
+  return pool.query(text, params)
+}
+
+export async function getClient() {
+  return pool.connect()
+}
 
 export function formatVector(embedding) {
   return '[' + embedding.join(',') + ']'
@@ -247,6 +254,155 @@ export async function initSchema() {
         size BIGINT,
         uploaded_at TIMESTAMPTZ DEFAULT now()
       )
+    `)
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS companies (
+        id            SERIAL PRIMARY KEY,
+        slug          TEXT UNIQUE NOT NULL,
+        name          TEXT NOT NULL,
+        fund          TEXT NOT NULL CHECK (fund IN ('fund1','fund2','fund3')),
+        sector        TEXT,
+        stage         TEXT,
+        status        TEXT DEFAULT 'active'
+          CHECK (status IN ('active','exited','written-off')),
+        logo_initials TEXT,
+        logo_color    TEXT,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS rss_sources (
+        id          SERIAL PRIMARY KEY,
+        company_id  INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+        feed_url    TEXT NOT NULL,
+        label       TEXT,
+        active      BOOLEAN DEFAULT TRUE,
+        last_fetched_at TIMESTAMPTZ,
+        created_at  TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS scrape_targets (
+        id           SERIAL PRIMARY KEY,
+        company_id   INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+        url          TEXT NOT NULL,
+        label        TEXT,
+        article_selector    TEXT DEFAULT 'article',
+        title_selector      TEXT DEFAULT 'h2 a, h3 a',
+        summary_selector    TEXT DEFAULT 'p',
+        date_selector       TEXT DEFAULT 'time',
+        active       BOOLEAN DEFAULT TRUE,
+        last_scraped_at TIMESTAMPTZ,
+        created_at   TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS news_items (
+        id           SERIAL PRIMARY KEY,
+        company_id   INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+        source_type  TEXT NOT NULL CHECK (source_type IN ('rss','scrape','manual')),
+        source_label TEXT,
+        external_url TEXT,
+        title        TEXT NOT NULL,
+        raw_summary  TEXT,
+        ai_summary   TEXT,
+        sentiment    TEXT DEFAULT 'neutral'
+          CHECK (sentiment IN ('positive','negative','neutral','watch')),
+        sentiment_score NUMERIC(5,2),
+        category     TEXT,
+        tags         TEXT[],
+        published_at TIMESTAMPTZ,
+        ingested_at  TIMESTAMPTZ DEFAULT NOW(),
+        is_published BOOLEAN DEFAULT TRUE,
+        dedup_hash   TEXT UNIQUE
+      )
+    `)
+
+    await client.query('CREATE INDEX IF NOT EXISTS idx_news_company    ON news_items(company_id)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_news_sentiment  ON news_items(sentiment)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_news_published  ON news_items(published_at DESC)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_news_fund       ON news_items(company_id)')
+
+    await client.query(`
+      CREATE OR REPLACE FUNCTION update_updated_at()
+      RETURNS TRIGGER AS $$
+      BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+      $$ LANGUAGE plpgsql;
+    `)
+
+    await client.query('DROP TRIGGER IF EXISTS trg_companies_updated_at ON companies')
+    await client.query(`
+      CREATE TRIGGER trg_companies_updated_at
+      BEFORE UPDATE ON companies
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+    `)
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS newsletter_issues (
+        id            SERIAL PRIMARY KEY,
+        title         TEXT NOT NULL,
+        period_label  TEXT,
+        status        TEXT DEFAULT 'draft'
+          CHECK (status IN ('draft', 'in_review', 'published')),
+        created_by    TEXT,
+        published_at  TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS newsletter_picks (
+        id            SERIAL PRIMARY KEY,
+        issue_id      INTEGER NOT NULL REFERENCES newsletter_issues(id) ON DELETE CASCADE,
+        news_item_id  INTEGER NOT NULL REFERENCES news_items(id) ON DELETE CASCADE,
+        sort_order    INTEGER DEFAULT 0,
+        editor_note   TEXT,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (issue_id, news_item_id)
+      )
+    `)
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS newsletter_segments (
+        id            SERIAL PRIMARY KEY,
+        issue_id      INTEGER NOT NULL REFERENCES newsletter_issues(id) ON DELETE CASCADE,
+        segment_type  TEXT NOT NULL
+          CHECK (segment_type IN (
+            'portfolio_highlights',
+            'market_context',
+            'founder_spotlight',
+            'custom'
+          )),
+        title         TEXT,
+        body          TEXT,
+        company_id    INTEGER REFERENCES companies(id),
+        sort_order    INTEGER DEFAULT 0,
+        created_by    TEXT,
+        created_at    TIMESTAMPTZ DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+
+    await client.query('CREATE INDEX IF NOT EXISTS idx_picks_issue       ON newsletter_picks(issue_id)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_segments_issue    ON newsletter_segments(issue_id)')
+    await client.query('CREATE INDEX IF NOT EXISTS idx_issues_status     ON newsletter_issues(status)')
+    await client.query('DROP TRIGGER IF EXISTS trg_issues_updated_at ON newsletter_issues')
+    await client.query(`
+      CREATE TRIGGER trg_issues_updated_at
+      BEFORE UPDATE ON newsletter_issues
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+    `)
+    await client.query('DROP TRIGGER IF EXISTS trg_segments_updated_at ON newsletter_segments')
+    await client.query(`
+      CREATE TRIGGER trg_segments_updated_at
+      BEFORE UPDATE ON newsletter_segments
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at()
     `)
   } catch (err) {
     const isTimeout =

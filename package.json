@@ -17,6 +17,8 @@
     "repair:unknown-companies": "node scripts/repairUnknownCompanyNames.js",
     "repair:blank-poc": "node scripts/repairBlankPoc.js",
     "merge:duplicates": "node scripts/mergeDuplicateDeals.js",
+    "news:ingest": "node scripts/ingestNews.js",
+    "news:reseed-sources": "node scripts/reseedNewsSources.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -26,13 +28,17 @@
   "dependencies": {
     "@google/genai": "^1.44.0",
     "@neondatabase/serverless": "^0.10.0",
+    "axios": "^1.13.6",
+    "cheerio": "^1.2.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "googleapis": "^144.0.0",
     "jsonwebtoken": "^9.0.2",
     "mammoth": "^1.11.0",
     "multer": "^2.1.1",
-    "pg": "^8.13.0"
+    "node-cron": "^4.2.1",
+    "pg": "^8.13.0",
+    "rss-parser": "^3.13.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

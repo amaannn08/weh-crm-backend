@@ -1,13 +1,19 @@
 import 'dotenv/config'
 import express from 'express'
 import { join } from 'path'
+import cron from 'node-cron'
 import authRoutes from './routes/auth.js'
 import assistantRoutes from './routes/assistant.js'
 import conversationRoutes from './routes/conversations.js'
 import dealsRoutes from './routes/deals.js'
 import meetingsRoutes from './routes/meetings.js'
+import portfolioNewsRoutes from './modules/portfolioNews/routes/news.js'
+import portfolioCompaniesRoutes from './modules/portfolioNews/routes/companies.js'
+import portfolioNewslettersRoutes from './modules/portfolioNews/routes/newsletters.js'
+import portfolioAdminRoutes from './modules/portfolioNews/routes/admin.js'
 import { authMiddleware } from './middleware/auth.js'
 import { initSchema } from './db/neon.js'
+import { runIngest } from './modules/portfolioNews/jobs/ingest.js'
 
 const app = express()
 const PORT = process.env.PORT ?? 3000
@@ -40,6 +46,23 @@ app.use('/assistant', authMiddleware, assistantRoutes)
 app.use('/conversations', authMiddleware, conversationRoutes)
 app.use('/deals', authMiddleware, dealsRoutes)
 app.use('/meetings', authMiddleware, meetingsRoutes)
+app.use('/news', portfolioNewsRoutes)
+app.use('/companies', portfolioCompaniesRoutes)
+app.use('/newsletters', portfolioNewslettersRoutes)
+app.use('/admin', portfolioAdminRoutes)
+
+const newsCronEnabled = process.env.NEWS_INGEST_CRON_ENABLED === 'true'
+const ingestCron = process.env.INGEST_CRON || '0 */6 * * *'
+if (newsCronEnabled) {
+  if (cron.validate(ingestCron)) {
+    cron.schedule(ingestCron, () => {
+      runIngest().catch((err) => console.error('[cron] Ingest error:', err))
+    })
+    console.log(`[cron] Portfolio news ingest scheduled: ${ingestCron}`)
+  } else {
+    console.warn(`[cron] Invalid INGEST_CRON expression: "${ingestCron}" — cron disabled`)
+  }
+}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on http://localhost:${PORT}`)
