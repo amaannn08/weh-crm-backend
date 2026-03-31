@@ -8,6 +8,7 @@
     "dev": "nodemon server.js",
     "ingest": "node pipelines/localIngestion.js",
     "ingest:drive": "node pipelines/driveIngestion.js",
+    "authorize:drive": "node scripts/authorizeGoogleDrive.js",
     "ingest:deals": "node scripts/ingestDealsOnce.js",
     "clear:deals": "node scripts/clearDeals.js",
     "clear:meetings": "node scripts/clearDeals.js --meetings",

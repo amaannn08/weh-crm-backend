@@ -14,6 +14,7 @@ import portfolioAdminRoutes from './modules/portfolioNews/routes/admin.js'
 import { authMiddleware } from './middleware/auth.js'
 import { initSchema } from './db/neon.js'
 import { runIngest } from './modules/portfolioNews/jobs/ingest.js'
+import { runDriveIngest } from './pipelines/driveIngestion.js'
 
 const app = express()
 const PORT = process.env.PORT ?? 3000
@@ -51,6 +52,17 @@ app.use('/companies', portfolioCompaniesRoutes)
 app.use('/newsletters', portfolioNewslettersRoutes)
 app.use('/admin', portfolioAdminRoutes)
 
+// Manual trigger: POST /admin/ingest/drive
+app.post('/admin/ingest/drive', authMiddleware, async (_req, res) => {
+  try {
+    const result = await runDriveIngest()
+    return res.json(result)
+  } catch (err) {
+    console.error('[admin] Drive ingest error:', err)
+    return res.status(500).json({ error: err.message || 'Drive ingest failed' })
+  }
+})
+
 const newsCronEnabled = process.env.NEWS_INGEST_CRON_ENABLED === 'true'
 const ingestCron = process.env.INGEST_CRON || '0 */6 * * *'
 if (newsCronEnabled) {
@@ -61,6 +73,19 @@ if (newsCronEnabled) {
     console.log(`[cron] Portfolio news ingest scheduled: ${ingestCron}`)
   } else {
     console.warn(`[cron] Invalid INGEST_CRON expression: "${ingestCron}" — cron disabled`)
+  }
+}
+
+const driveIngestEnabled = process.env.DRIVE_INGEST_CRON_ENABLED === 'true'
+const driveIngestCron = process.env.DRIVE_INGEST_CRON || '0 */6 * * *'
+if (driveIngestEnabled) {
+  if (cron.validate(driveIngestCron)) {
+    cron.schedule(driveIngestCron, () => {
+      runDriveIngest().catch((err) => console.error('[cron] Drive ingest error:', err))
+    })
+    console.log(`[cron] Drive transcript ingest scheduled: ${driveIngestCron}`)
+  } else {
+    console.warn(`[cron] Invalid DRIVE_INGEST_CRON expression: "${driveIngestCron}" — cron disabled`)
   }
 }
 
