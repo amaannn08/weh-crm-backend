@@ -422,6 +422,7 @@ router.post(
 
 
 async function fetchDealBundle(id) {
+  // First confirm the deal exists
   const dealRows = await sql`
     SELECT *
     FROM deals
@@ -431,44 +432,43 @@ async function fetchDealBundle(id) {
   const deal = dealRows[0] ?? null
   if (!deal) return null
 
-  const softRows = await sql`
-    SELECT *
-    FROM founder_soft_scores
-    WHERE deal_id = ${id}
-    ORDER BY created_at DESC
-    LIMIT 1
-  `
-
-  const hardRows = await sql`
-    SELECT *
-    FROM founder_hard_scores
-    WHERE deal_id = ${id}
-    ORDER BY created_at DESC
-    LIMIT 1
-  `
-
-  const finalRows = await sql`
-    SELECT *
-    FROM founder_final_scores
-    WHERE deal_id = ${id}
-    ORDER BY created_at DESC
-    LIMIT 1
-  `
-
-  const insightsRows = await sql`
-    SELECT *
-    FROM deal_insights
-    WHERE deal_id = ${id}
-    ORDER BY created_at DESC
-    LIMIT 1
-  `
-
-  const fileRows = await sql`
-    SELECT id, file_name, stored_path, mime_type, size, uploaded_at
-    FROM deal_files
-    WHERE deal_id = ${id}
-    ORDER BY uploaded_at DESC
-  `
+  // Fire all 5 sub-queries in parallel — each is independent
+  const [softRows, hardRows, finalRows, insightsRows, fileRows] = await Promise.all([
+    sql`
+      SELECT *
+      FROM founder_soft_scores
+      WHERE deal_id = ${id}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    sql`
+      SELECT *
+      FROM founder_hard_scores
+      WHERE deal_id = ${id}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    sql`
+      SELECT *
+      FROM founder_final_scores
+      WHERE deal_id = ${id}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    sql`
+      SELECT *
+      FROM deal_insights
+      WHERE deal_id = ${id}
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    sql`
+      SELECT id, file_name, stored_path, mime_type, size, uploaded_at
+      FROM deal_files
+      WHERE deal_id = ${id}
+      ORDER BY uploaded_at DESC
+    `
+  ])
 
   return {
     deal,
