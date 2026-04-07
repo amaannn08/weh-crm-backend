@@ -63,6 +63,17 @@ app.post('/admin/ingest/drive', authMiddleware, async (_req, res) => {
   }
 })
 
+// Temp debug: GET /admin/sheet-test
+app.get('/admin/sheet-test', authMiddleware, async (_req, res) => {
+  try {
+    const { sheetQueryTool } = await import('./services/tools/sheetQueryTool.js')
+    const result = await sheetQueryTool.execute({ input: { query: 'test', tab: 'Sheet1' } })
+    return res.json({ ok: true, preview: result.sheetContext?.slice(0, 500) })
+  } catch (err) {
+    return res.status(500).json({ error: err.message })
+  }
+})
+
 const newsCronEnabled = process.env.NEWS_INGEST_CRON_ENABLED === 'true'
 const ingestCron = process.env.INGEST_CRON || '0 */6 * * *'
 if (newsCronEnabled) {

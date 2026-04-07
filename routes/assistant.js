@@ -5,23 +5,25 @@ import { createSession } from '../services/session.js'
 import { meetingSearchTool } from '../services/tools/meetingSearchTool.js'
 import { dealLookupByCompanyTool } from '../services/tools/dealLookupTool.js'
 import { listAllDealsTool } from '../services/tools/listAllDealsTool.js'
+import { sheetQueryTool } from '../services/tools/sheetQueryTool.js'
 import { planWithLLM } from '../services/planner.js'
 
 const router = Router()
 
 const SYSTEM_PROMPT = `You are Jarvis, an AI assistant for a venture capital CRM (WEH Ventures).
 
-You have access to two kinds of information:
+You have access to three kinds of information:
 - MEETING TRANSCRIPTS (GROUND TRUTH): verbatim transcripts of investor calls.
 - COMPANY DATA / PIPELINE DATA (STRUCTURED): deal records from the CRM database.
+- GOOGLE SHEET DATA (STRUCTURED): live data from the WEH Ventures tracking sheet, including deal evaluations (Status, Conviction Score, Reasons for Pass/Watch), outbound contacts log, referrals, and team meeting notes.
 
 Rules:
-- Treat MEETING TRANSCRIPTS and COMPANY DATA as your factual sources.
+- Treat MEETING TRANSCRIPTS, COMPANY DATA, and GOOGLE SHEET DATA as your factual sources.
 - Use CHAT HISTORY only to resolve references (like "they", "their"), not as evidence.
 - Do NOT invent names, numbers, or facts not present in the provided data.
 - If the data does not contain the answer, say so clearly.
 - Be concise and directly answer the user's latest question.
-- When presenting pipeline data, format it clearly (lists, tables in markdown).`
+- When presenting pipeline or sheet data, format it clearly (lists, tables in markdown).`
 
 router.post('/chat', async (req, res) => {
   const { message, conversationId } = req.body
@@ -35,7 +37,7 @@ router.post('/chat', async (req, res) => {
       userMessage: message
     })
 
-    const availableTools = [meetingSearchTool, dealLookupByCompanyTool, listAllDealsTool]
+    const availableTools = [meetingSearchTool, dealLookupByCompanyTool, listAllDealsTool, sheetQueryTool]
 
     // ── LLM routing: decide which tools to call ──────────────────────────────
     const plan = await planWithLLM({
@@ -49,6 +51,7 @@ router.post('/chat', async (req, res) => {
     let meetingMode = 'none'
     let companyDataSection = ''
     let pipelineDataSection = ''
+    let sheetDataSection = ''
 
     if (plan.action === 'call_tools' && Array.isArray(plan.tools) && plan.tools.length > 0) {
       for (const step of plan.tools) {
@@ -80,6 +83,11 @@ router.post('/chat', async (req, res) => {
             return `- ${parts.join(' | ')}`
           })
           companyDataSection = `COMPANY DATA (FROM CRM):\n\n${lines.join('\n')}\n\n`
+        }
+
+        // sheet_query
+        if (tool.id === 'sheet_query' && result?.sheetContext) {
+          sheetDataSection = `GOOGLE SHEET DATA (LIVE):\n\n${result.sheetContext}\n\n`
         }
 
         // list_all_deals
@@ -114,7 +122,7 @@ router.post('/chat', async (req, res) => {
       : ''
     const taskSection = `TASK:\n\nAnswer the user's latest question using the data provided above. Use chat history only to resolve references. If the data does not contain the answer, say you don't know.\n\nUser question:\n${message}`
 
-    const userContent = `${meetingSection}${companyDataSection}${pipelineDataSection}${historySection}${taskSection}`
+    const userContent = `${meetingSection}${companyDataSection}${pipelineDataSection}${sheetDataSection}${historySection}${taskSection}`
 
     // ── Stream final answer ───────────────────────────────────────────────────
     let fullAssistantContent = ''

@@ -7,10 +7,19 @@ router.get('/', async (_req, res) => {
   try {
     const rows = await sql`
       SELECT
-        dm.*,
+        dm.id,
+        dm.deal_id,
+        dm.meeting_date,
         d.company,
         d.sector,
-        d.poc
+        d.poc,
+        d.status,
+        d.conviction_score,
+        d.exciting_reason,
+        d.risks,
+        d.pass_reasons,
+        d.watch_reasons,
+        d.action_required
       FROM deal_meetings dm
       JOIN deals d ON dm.deal_id = d.id
       ORDER BY d.created_at DESC

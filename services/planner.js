@@ -9,11 +9,18 @@ Available tools:
   - If a SPECIFIC company is mentioned by name, also set "company" to that company name so transcripts are filtered to that company only.
 - deal_lookup_by_company: fetches structured CRM data for a SPECIFIC named company (score, stage, status, POC, sector, risks, etc). Use when the user asks about a specific company's details.
 - list_all_deals: fetches all deals (optionally filtered by status). Use for broad pipeline questions like "what companies are in portfolio?", "how many active deals?", "show all deals", "what's the average score?".
+- sheet_query: queries the WEH Ventures Google Sheet which has 4 tabs:
+    (1) "Team meetings" tab — THE MAIN DEAL PIPELINE SHEET: Company, Date, POC, Sector, Status (Pass/IC/Track/Founder watch), "Why is this exciting?", Risks, "Conviction Score (on 10)", "Reasons for Pass", "Reasons to watch", "Action required". Use for conviction scores, deal statuses, pass/watch reasons, portfolio.
+    (2) "Outbound Contacts" tab — Outbound outreach log: Date, Name, Company Name, Industry, Description, Logged By, Reverted?, Email, Remarks.
+    (3) "Referrals" tab — Referral tracking: Date, Name, Company Name, Industry, Direction (Inbound/Outbound), Logged By, Reverted?, Email, Remarks, Priority.
+    (4) "Sheet1" tab — Inbound contacts log: Name, Industry, Description, Logged By, Notes.
+  Use sheet_query when the user asks about: conviction scores, company deal status/pipeline from the sheet, pass/watch reasons, outbound contacts, referrals, or anything from "the sheet". Set "query" to the user question, optionally set "company" if a specific company is mentioned, optionally set "tab" to target a specific tab.
 
 Rules:
 - For company-specific questions: call BOTH meeting_search (with company set) AND deal_lookup_by_company.
 - For broad pipeline questions: call list_all_deals only (no transcript search needed).
 - For topic searches with no specific company: call meeting_search (without company).
+- For sheet-specific questions (conviction scores, outbound contacts, referrals, team meeting sheet, or explicit "in the sheet"): call sheet_query. If a company is also mentioned, also call deal_lookup_by_company.
 - If it's a simple conversational follow-up with no new company or topic, call no tools.
 - Never call list_all_deals and deal_lookup_by_company for the same query.`
 

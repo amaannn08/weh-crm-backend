@@ -555,9 +555,23 @@ router.get('/:id/meeting', async (req, res) => {
   const { id } = req.params
   try {
     const rows = await sql`
-      SELECT *
-      FROM deal_meetings
-      WHERE deal_id = ${id}
+      SELECT
+        dm.id,
+        dm.deal_id,
+        dm.meeting_date,
+        d.company,
+        d.sector,
+        d.poc,
+        d.status,
+        d.conviction_score,
+        d.exciting_reason,
+        d.risks,
+        d.pass_reasons,
+        d.watch_reasons,
+        d.action_required
+      FROM deal_meetings dm
+      JOIN deals d ON dm.deal_id = d.id
+      WHERE dm.deal_id = ${id}
       LIMIT 1
     `
     const meeting = rows[0] ?? null
@@ -684,6 +698,16 @@ router.patch('/:id/meeting', async (req, res) => {
     if (!updated) {
       return res.status(404).json({ error: 'Meeting not found for this deal' })
     }
+
+    // Keep deals table synchronized for meeting note fields
+    const dealSyncText = `
+      UPDATE deals
+      SET ${setFragments.join(', ')}, updated_at = now()
+      WHERE id = $${values.length + 1}
+    `
+    // Execute but ignore errors if some patch key doesn't map to deals (they all should)
+    await poolRef.query(dealSyncText, [...values, id]).catch(e => console.error('Error syncing to deals:', e))
+
     return res.json(updated)
   } catch (err) {
     console.error('Error updating deal meeting', err)
