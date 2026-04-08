@@ -1,0 +1,9 @@
+[sheetQueryTool] Loaded "Sheet1": 1346 rows
+[sheetQueryTool] Loaded "Outbound Contacts": 93 rows
+[sheetQueryTool] Loaded "Referrals": 23 rows
+[sheetQueryTool] Loaded "Team meetings": 50 rows
+[Sheet1] (1346 total rows, showing latest 500):
+Timestamp: 4/7/2026 15:48:47 | Name: Wizr | Industry: AI/ML SaaS | Description: An enterprise AI platform for building and deploying AI agents to automate workflows and software development. | Logged By: ayushs@wehventures.com | Team Meeting: No | Notes: —
+Timestamp: 4/1/2026 13:35:35 | Name: Per-Ton.ai | Industry: AI/ML SaaS | Description: AI platform for decision-making and workflow in physical commodity trading. | Logged By: rohit@wehventures.com | Team Meeting: No | Notes: —
+Timestamp: 4/6/2026 13:32:03 | Name: StitchNow (Urgentlee) | Industry: Fashion/Apparel | Description: On-demand home tailoring and alterations platform connecting urban consumers with tailors. | Logged By: rohit@wehventures.com | Team Meeting: No | Notes: —
+Timestamp: 4/6/2026 16:04:53 | Name: Relata | Industry: PropTech | Description: End-to-end operating system for real estate developers managing sales and transactions. | Logged By: rohit@wehventures.com | Team 

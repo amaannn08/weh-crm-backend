@@ -15,15 +15,51 @@ const SYSTEM_PROMPT = `You are Jarvis, an AI assistant for a venture capital CRM
 You have access to three kinds of information:
 - MEETING TRANSCRIPTS (GROUND TRUTH): verbatim transcripts of investor calls.
 - COMPANY DATA / PIPELINE DATA (STRUCTURED): deal records from the CRM database.
-- GOOGLE SHEET DATA (STRUCTURED): live data from the WEH Ventures tracking sheet, including deal evaluations (Status, Conviction Score, Reasons for Pass/Watch), outbound contacts log, referrals, and team meeting notes.
+- GOOGLE SHEET DATA (STRUCTURED): live data from the WEH Ventures tracking sheet.
+  The sheet has 4 tabs: INBOUND CONTACTS LOG (Sheet1), OUTBOUND CONTACTS LOG, REFERRALS LOG, DEAL PIPELINE EVALUATIONS.
 
 Rules:
 - Treat MEETING TRANSCRIPTS, COMPANY DATA, and GOOGLE SHEET DATA as your factual sources.
+- CRITICAL: When GOOGLE SHEET DATA is present, trust the numbers exactly as written.
+  The fields "ROWS MATCHING FILTERS" and "COUNT BY YEAR" are computed precisely by code — do NOT second-guess them.
+  If it says "COUNT BY YEAR: 2026: 71" then the answer for 2026 is exactly 71. Do not say 0 or estimate.
 - Use CHAT HISTORY only to resolve references (like "they", "their"), not as evidence.
 - Do NOT invent names, numbers, or facts not present in the provided data.
 - If the data does not contain the answer, say so clearly.
 - Be concise and directly answer the user's latest question.
 - When presenting pipeline or sheet data, format it clearly (lists, tables in markdown).`
+
+// ─── SSE helpers ───────────────────────────────────────────────────────────────
+
+function sse(res, data) {
+  res.write(`data: ${JSON.stringify(data)}\n\n`)
+}
+
+function getToolLabel(toolId, input = {}) {
+  switch (toolId) {
+    case 'sheet_query': {
+      const tab = input.tab || 'sheet'
+      let label = `Querying ${tab}`
+      if (input.filterMonth) label += ` for ${input.filterMonth}`
+      if (input.filterYear)  label += ` ${input.filterYear}`
+      return label + '…'
+    }
+    case 'meeting_search':
+      return input.company
+        ? `Searching transcripts for ${input.company}…`
+        : 'Searching meeting transcripts…'
+    case 'deal_lookup_by_company':
+      return input.company
+        ? `Looking up ${input.company} in CRM…`
+        : 'Looking up company in CRM…'
+    case 'list_all_deals':
+      return 'Loading full deal pipeline…'
+    default:
+      return `Running ${toolId}…`
+  }
+}
+
+// ─── Route ────────────────────────────────────────────────────────────────────
 
 router.post('/chat', async (req, res) => {
   const { message, conversationId } = req.body
@@ -31,77 +67,86 @@ router.post('/chat', async (req, res) => {
     return res.status(400).json({ error: 'message (string) required' })
   }
 
+  const { session, conversationTitle, historyBlob } = await createSession({
+    conversationId,
+    userMessage: message
+  })
+
+  // ── SSE headers ─────────────────────────────────────────────────────────────
+  res.setHeader('Content-Type', 'text/event-stream')
+  res.setHeader('Cache-Control', 'no-cache')
+  res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Conversation-Id', session.conversationId)
+  res.flushHeaders?.()
+
+  const availableTools = [meetingSearchTool, dealLookupByCompanyTool, listAllDealsTool, sheetQueryTool]
+
+  let meetingContext = 'No meeting transcripts available.'
+  let meetingMode = 'none'
+  let companyDataSection = ''
+  let pipelineDataSection = ''
+  let sheetDataSection = ''
+  let fullAssistantContent = ''
+
   try {
-    const { session, conversationTitle, historyBlob } = await createSession({
-      conversationId,
-      userMessage: message
-    })
+    // ── Plan ──────────────────────────────────────────────────────────────────
+    const plan = await planWithLLM({ tools: availableTools, userMessage: message, historyBlob })
 
-    const availableTools = [meetingSearchTool, dealLookupByCompanyTool, listAllDealsTool, sheetQueryTool]
-
-    // ── LLM routing: decide which tools to call ──────────────────────────────
-    const plan = await planWithLLM({
-      tools: availableTools,
-      userMessage: message,
-      historyBlob
-    })
-
-    // ── Execute planned tools ────────────────────────────────────────────────
-    let meetingContext = 'No meeting transcripts available.'
-    let meetingMode = 'none'
-    let companyDataSection = ''
-    let pipelineDataSection = ''
-    let sheetDataSection = ''
-
+    // ── Execute tools with SSE status events ─────────────────────────────────
     if (plan.action === 'call_tools' && Array.isArray(plan.tools) && plan.tools.length > 0) {
-      for (const step of plan.tools) {
+      for (let i = 0; i < plan.tools.length; i++) {
+        const step = plan.tools[i]
         const tool = availableTools.find((t) => t.id === step.id)
         if (!tool) continue
 
+        const key = `${step.id}_${i}`
+        const label = getToolLabel(step.id, step.input)
+
+        sse(res, { type: 'tool_start', tool: step.id, key, label })
+
         const result = await tool.execute({ session, input: step.input })
 
-        // meeting_search
+        sse(res, { type: 'tool_done', key })
+
+        // Accumulate results
         if (tool.id === 'meeting_search' && result) {
           if (result.context) meetingContext = result.context
-          if (result.mode) meetingMode = result.mode
+          if (result.mode)    meetingMode    = result.mode
         }
 
-        // deal_lookup_by_company
         if (tool.id === 'deal_lookup_by_company' && result?.deals?.length > 0) {
           const lines = result.deals.map((d, idx) => {
             const parts = [`Deal ${idx + 1}:`]
-            if (d.company) parts.push(`Company: ${d.company}`)
-            if (d.stage) parts.push(`Stage: ${d.stage}`)
-            if (d.sector) parts.push(`Sector: ${d.sector}`)
-            if (d.status) parts.push(`Status: ${d.status}`)
-            if (d.poc) parts.push(`POC: ${d.poc}`)
-            if (d.meeting_date) parts.push(`Meeting date: ${d.meeting_date}`)
+            if (d.company)              parts.push(`Company: ${d.company}`)
+            if (d.stage)                parts.push(`Stage: ${d.stage}`)
+            if (d.sector)               parts.push(`Sector: ${d.sector}`)
+            if (d.status)               parts.push(`Status: ${d.status}`)
+            if (d.poc)                  parts.push(`POC: ${d.poc}`)
+            if (d.meeting_date)         parts.push(`Meeting date: ${d.meeting_date}`)
             if (d.conviction_score != null) parts.push(`Conviction score: ${d.conviction_score}`)
             if (d.founder_final_score != null) parts.push(`Founder score: ${d.founder_final_score}`)
-            if (d.exciting_reason) parts.push(`Why exciting: ${d.exciting_reason}`)
-            if (d.risks) parts.push(`Risks: ${d.risks}`)
+            if (d.exciting_reason)      parts.push(`Why exciting: ${d.exciting_reason}`)
+            if (d.risks)                parts.push(`Risks: ${d.risks}`)
             return `- ${parts.join(' | ')}`
           })
           companyDataSection = `COMPANY DATA (FROM CRM):\n\n${lines.join('\n')}\n\n`
         }
 
-        // sheet_query
         if (tool.id === 'sheet_query' && result?.sheetContext) {
-          sheetDataSection = `GOOGLE SHEET DATA (LIVE):\n\n${result.sheetContext}\n\n`
+          sheetDataSection += `GOOGLE SHEET DATA (LIVE):\n\n${result.sheetContext}\n\n`
         }
 
-        // list_all_deals
         if (tool.id === 'list_all_deals' && result?.deals) {
           const filterLabel = result.status && result.status !== 'all'
             ? `Status filter: ${result.status}`
             : 'All deals'
           const lines = result.deals.map((d) => {
             const parts = []
-            if (d.company) parts.push(d.company)
-            if (d.status) parts.push(`[${d.status}]`)
-            if (d.sector) parts.push(`sector: ${d.sector}`)
+            if (d.company)               parts.push(d.company)
+            if (d.status)                parts.push(`[${d.status}]`)
+            if (d.sector)                parts.push(`sector: ${d.sector}`)
             if (d.founder_final_score != null) parts.push(`score: ${d.founder_final_score}`)
-            if (d.poc) parts.push(`POC: ${d.poc}`)
+            if (d.poc)                   parts.push(`POC: ${d.poc}`)
             return `- ${parts.join(' | ')}`
           })
           pipelineDataSection = `PIPELINE DATA (${filterLabel} — ${result.deals.length} deals):\n\n${lines.join('\n')}\n\n`
@@ -109,38 +154,37 @@ router.post('/chat', async (req, res) => {
       }
     }
 
-    // ── Build context for final answer ───────────────────────────────────────
-    const hasHistory = !!historyBlob
+    // ── Build prompt ──────────────────────────────────────────────────────────
     const meetingHeaderPrefix =
       meetingMode === 'fallback_semantic'
-        ? 'These are the closest matching meeting transcripts found; they may not be about the exact company or question.\n\n'
+        ? 'These are the closest matching transcripts found; they may not be about the exact question.\n\n'
         : ''
 
-    const meetingSection = `MEETING TRANSCRIPTS (GROUND TRUTH):\n\n${meetingHeaderPrefix}${meetingContext}\n\n`
-    const historySection = hasHistory
+    // Only include meeting transcripts if they were actually retrieved
+    const meetingSection = meetingContext !== 'No meeting transcripts available.'
+      ? `MEETING TRANSCRIPTS (GROUND TRUTH):\n\n${meetingHeaderPrefix}${meetingContext}\n\n`
+      : ''
+    const historySection = historyBlob
       ? `CHAT HISTORY (CONVERSATION ONLY — NOT GROUND TRUTH):\n\n${historyBlob}\n\n`
       : ''
-    const taskSection = `TASK:\n\nAnswer the user's latest question using the data provided above. Use chat history only to resolve references. If the data does not contain the answer, say you don't know.\n\nUser question:\n${message}`
+    const taskSection = `TASK:\n\nAnswer the user's latest question using ONLY the data provided above. Trust numbers in GOOGLE SHEET DATA exactly as written — they are computed by code. If COUNT BY YEAR is present, read the exact number from it to answer count questions. Do not estimate or say 0 if data is present.\n\nUser question:\n${message}`
 
-    const userContent = `${meetingSection}${companyDataSection}${pipelineDataSection}${sheetDataSection}${historySection}${taskSection}`
+    // Sheet data comes first so it isn't buried under transcripts
+    const userContent = `${sheetDataSection}${companyDataSection}${pipelineDataSection}${meetingSection}${historySection}${taskSection}`
 
-    // ── Stream final answer ───────────────────────────────────────────────────
-    let fullAssistantContent = ''
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-    res.setHeader('Transfer-Encoding', 'chunked')
-    res.setHeader('X-Conversation-Id', session.conversationId)
-    res.flushHeaders?.()
-
+    // ── Stream LLM answer ─────────────────────────────────────────────────────
     await streamChat(
       [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userContent }
+        { role: 'user',   content: userContent   }
       ],
       (chunk) => {
         fullAssistantContent += chunk
-        res.write(chunk)
+        sse(res, { type: 'text', content: chunk })
       }
     )
+
+    sse(res, { type: 'done' })
     res.end()
 
     // ── Persist messages ──────────────────────────────────────────────────────
@@ -155,14 +199,16 @@ router.post('/chat', async (req, res) => {
     const normalizedTitle = (conversationTitle || '').trim()
     if (!normalizedTitle || normalizedTitle === 'New session') {
       const firstLine = message.split('\n')[0] ?? ''
-      const newTitle = firstLine.slice(0, 80).trim() || 'New session'
+      const newTitle  = firstLine.slice(0, 80).trim() || 'New session'
       await sql`UPDATE conversations SET title = ${newTitle} WHERE id = ${session.conversationId}::uuid`
     }
+
   } catch (err) {
-    console.error('[assistant] error handling chat', err)
+    console.error('[assistant] error handling chat:', err)
     if (!res.headersSent) {
       res.status(500).json({ error: err.message || 'Assistant error' })
     } else {
+      sse(res, { type: 'error', message: err.message || 'Assistant error' })
       res.end()
     }
   }

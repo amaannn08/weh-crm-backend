@@ -1,235 +1,196 @@
 /**
  * sheetQueryTool.js
  *
- * Fetches the WEH Ventures deal-tracking Google Sheet via the Sheets REST API
- * directly, using the OAuth2 access token stored in google-token.json.
- * If the token is expired, it automatically refreshes it via the token endpoint.
+ * The LLM acts as the query planner — it picks the tab and filters.
+ * This tool spawns sheet_query.py (Python) which fetches and filters the
+ * raw Google Sheets data with proper date parsing, returning clean JSON.
  *
- * The spreadsheet has 4 named tabs:
- *   Sheet1            — Deal evaluations
- *   Outbound Contacts — Outreach log
- *   Referrals         — Referral tracking
- *   Team meetings     — Team meeting notes
- *
- * Sheet data is cached for 5 minutes.
+ * Tab schemas:
+ *   Sheet1            — Inbound contacts  (Timestamp, Name, Industry, Description, Logged By, Team Meeting, Notes)
+ *   Outbound Contacts — Outbound outreach (Date, Name, Company Name, Industry, Description, Logged By, Reverted?, Email, Remarks, Team Meeting)
+ *   Referrals         — Referral tracking (Date, Name, Company Name, Industry, Description, Direction, Logged By, Reverted?, Email, Remarks, Priority, Team Meeting)
+ *   Team meetings     — Deal pipeline     (Company, Date, POC, Sector, Status, Why is this exciting?, Risks, Conviction Score (on 10), Reasons for Pass, Reasons to watch, Action required)
  */
 
-import { readFileSync, existsSync, writeFileSync } from 'fs'
+import { execFile } from 'child_process'
 import { join } from 'path'
 
-const SPREADSHEET_ID = '1Nosp-GCCPp3gZJ3NM1JwPjHfknFCS8Ir7c3MuevuFhQ'
+// ─── Python runner ────────────────────────────────────────────────────────────
 
-const TABS = [
-  'Sheet1',
-  'Outbound Contacts',
-  'Referrals',
-  'Team meetings',
-]
+async function runPythonQuery({ tab, filterMonth, filterYear, filterKeyword, limit = 500 }) {
+  return new Promise((resolve, reject) => {
+    const scriptPath = join(process.cwd(), 'scripts', 'sheet_query.py')
+    const args = ['--tab', tab]
+    if (filterMonth)   args.push('--filter-month',   filterMonth)
+    if (filterYear)    args.push('--filter-year',    String(filterYear))
+    if (filterKeyword) args.push('--filter-keyword', filterKeyword)
+    args.push('--limit', String(limit))
 
-// ─── In-memory cache (5-minute TTL) ─────────────────────────────────────────
-const CACHE_TTL_MS = 5 * 60 * 1000
-const _cache = { data: null, fetchedAt: 0 }
-
-// ─── Token management ────────────────────────────────────────────────────────
-function loadTokens() {
-  const tokenPath = join(process.cwd(), process.env.GOOGLE_TOKEN_PATH || 'google-token.json')
-  if (!existsSync(tokenPath)) throw new Error('google-token.json not found')
-  return { tokens: JSON.parse(readFileSync(tokenPath, 'utf8')), tokenPath }
-}
-
-function saveTokens(tokenPath, tokens) {
-  writeFileSync(tokenPath, JSON.stringify(tokens, null, 2))
-  console.log('[sheetQueryTool] Refreshed tokens saved')
-}
-
-async function getValidAccessToken() {
-  const { tokens, tokenPath } = loadTokens()
-
-  // Check if current access_token is still valid (with 60s buffer)
-  const now = Date.now()
-  if (tokens.access_token && tokens.expiry_date && (tokens.expiry_date - now) > 60_000) {
-    return tokens.access_token
-  }
-
-  // Refresh using the refresh_token
-  const CLIENT_ID     = process.env.CLIENT_ID
-  const CLIENT_SECRET = process.env.CLIENT_SECRET
-  if (!CLIENT_ID || !CLIENT_SECRET) throw new Error('CLIENT_ID / CLIENT_SECRET not set')
-  if (!tokens.refresh_token) throw new Error('No refresh_token in google-token.json — please re-run authorizeGoogleDrive.js')
-
-  const res = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id:     CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      refresh_token: tokens.refresh_token,
-      grant_type:    'refresh_token'
+    execFile('python3', [scriptPath, ...args], {
+      cwd:       process.cwd(),
+      env:       process.env,   // pass CLIENT_ID, CLIENT_SECRET, GOOGLE_TOKEN_PATH through
+      timeout:   30_000,
+      maxBuffer: 10 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      if (err) {
+        console.error('[sheetQueryTool] Python stderr:', stderr?.slice(0, 500))
+        reject(new Error(`Python query failed: ${err.message}`))
+        return
+      }
+      try {
+        resolve(JSON.parse(stdout.trim()))
+      } catch (e) {
+        reject(new Error(`Could not parse Python output: ${stdout.slice(0, 300)}`))
+      }
     })
   })
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Token refresh failed (${res.status}): ${text.slice(0, 200)}`)
-  }
-
-  const refreshed = await res.json()
-  const merged = {
-    ...tokens,
-    access_token: refreshed.access_token,
-    expiry_date:  Date.now() + (refreshed.expires_in ?? 3600) * 1000,
-    ...(refreshed.refresh_token ? { refresh_token: refreshed.refresh_token } : {})
-  }
-  saveTokens(tokenPath, merged)
-  return merged.access_token
 }
 
-// ─── Sheets REST API fetch ───────────────────────────────────────────────────
-async function fetchSheetRange(accessToken, range) {
-  const encodedRange = encodeURIComponent(range)
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}/values/${encodedRange}`
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`Sheets API error for "${range}" (${res.status}): ${text.slice(0, 200)}`)
-  }
-  const json = await res.json()
-  return json.values ?? []   // array of arrays
+// ─── Format Python result for LLM ────────────────────────────────────────────
+
+const MAX_ROWS_FOR_LLM = 50   // cap to avoid context overload / hallucination
+
+// Columns to skip per tab — noisy or always-same-value fields
+const TAB_SKIP_COLUMNS = {
+  'Sheet1': new Set(['Team Meeting']),  // always "No"
 }
 
-// ─── Convert grid (array-of-arrays) to array-of-objects ─────────────────────
-function gridToObjects(rows) {
-  if (!rows || rows.length < 2) return []
-  const headers = rows[0].map(h => String(h ?? '').replace(/\s+/g, ' ').trim())
-  return rows.slice(1)
-    .filter(r => r.some(c => c != null && c !== ''))
-    .map(r => {
-      const obj = {}
-      headers.forEach((h, i) => { if (h) obj[h] = r[i] != null ? String(r[i]) : '' })
-      return obj
-    })
+// Human-readable label per tab so the LLM understands what it's looking at
+const TAB_LABELS = {
+  'Sheet1':            'INBOUND CONTACTS LOG (Sheet1)',
+  'Outbound Contacts': 'OUTBOUND CONTACTS LOG',
+  'Referrals':         'REFERRALS LOG',
+  'Team meetings':     'DEAL PIPELINE EVALUATIONS (Team meetings)',
 }
 
-// ─── Load all tabs (with caching) ───────────────────────────────────────────
-async function loadAllTabs() {
-  const now = Date.now()
-  if (_cache.data && (now - _cache.fetchedAt) < CACHE_TTL_MS) {
-    return _cache.data
+function formatRowsForLLM(result) {
+  const { tab, total_rows, filtered_count, year_breakdown, columns, rows } = result
+  const tabLabel = TAB_LABELS[tab] ?? tab
+
+  if (!rows || rows.length === 0) {
+    return (
+      `[${tabLabel}]: No data found matching the given filters.\n` +
+      `(Tab has ${total_rows} total rows — try broader filters or check the tab name.)`
+    )
   }
 
-  const accessToken = await getValidAccessToken()
-  const results = {}
+  // Build a clear summary the LLM can use to answer count questions immediately
+  const displayRows = rows.slice(0, MAX_ROWS_FOR_LLM)
+  const truncated = rows.length > MAX_ROWS_FOR_LLM
 
-  for (const tab of TABS) {
-    try {
-      const grid = await fetchSheetRange(accessToken, tab)
-      results[tab] = gridToObjects(grid)
-      console.log(`[sheetQueryTool] Loaded "${tab}": ${results[tab].length} rows`)
-    } catch (err) {
-      console.warn(`[sheetQueryTool] Could not load "${tab}": ${err.message}`)
-      results[tab] = []
-    }
+  let summary =
+    `[${tabLabel}]\n` +
+    `TOTAL ROWS IN TAB: ${total_rows}\n` +
+    `ROWS MATCHING FILTERS: ${filtered_count}\n`
+
+  // Year breakdown — critical for "how many in March 2026?" type questions
+  if (year_breakdown && Object.keys(year_breakdown).length > 0) {
+    const parts = Object.entries(year_breakdown)
+      .map(([yr, cnt]) => `${yr}: ${cnt}`)
+      .join(', ')
+    summary += `COUNT BY YEAR: ${parts}\n`
   }
 
-  _cache.data      = results
-  _cache.fetchedAt = now
-  return results
-}
+  summary += truncated
+    ? `SHOWING: first ${MAX_ROWS_FOR_LLM} of ${filtered_count} matched rows below\n`
+    : `SHOWING: all ${filtered_count} matched rows below\n`
 
-// ─── Format tab data for LLM ────────────────────────────────────────────────
-function formatTabAsText(tabName, records, limit = 300) {
-  if (!records || records.length === 0) return `[${tabName}]: No data available.\n`
-  const headers = Object.keys(records[0])
-  const sample  = records.slice(0, limit)
-  const lines   = sample.map(r =>
-    headers.map(h => `${h}: ${r[h] || '—'}`).join(' | ')
+  const skipCols = TAB_SKIP_COLUMNS[tab] ?? new Set()
+  const displayColumns = columns.filter(col => !skipCols.has(col))
+
+  const lines = displayRows.map(r =>
+    displayColumns
+      .filter(col => r[col] !== undefined && r[col] !== '')
+      .map(col => `${col}: ${r[col]}`)
+      .join(' | ')
   )
-  return `[${tabName}] (${records.length} total rows):\n` + lines.join('\n') + '\n'
+
+  return summary + '\n' + lines.join('\n')
 }
 
-// ─── Auto-detect which tabs to surface ──────────────────────────────────────
-// Sheet structure:
-//   Sheet1          = Inbound contacts (Name, Industry, Description, Logged By, Notes)
-//   Outbound Contacts = Outbound contact log (Date, Name, Company Name, Industry, Description, Logged By, Reverted?, Email, Remarks)
-//   Referrals       = Referral tracking (Date, Name, Company Name, Industry, Direction, Logged By, Reverted?, Email, Remarks, Priority)
-//   Team meetings   = Deal pipeline evaluations (Company, Date, POC, Sector, Status, Why exciting, Risks, Conviction Score, Reasons for Pass, Reasons to watch, Action required)
-function selectRelevantTabs(query) {
-  const q = query.toLowerCase()
+// ─── Tool export ──────────────────────────────────────────────────────────────
 
-  // Team meetings tab = deal evaluations / pipeline
-  const dealKw     = ['conviction', 'score', 'pass', 'watch', 'exciting', 'risk', 'action required',
-                      'sector', 'poc', 'status', 'pipeline', 'deal', 'portfolio', 'ic ', 'track',
-                      'founder watch', 'team meeting']
-  // Outbound tab
-  const outboundKw = ['outbound', 'outreach']
-  // Referrals tab
-  const referralKw = ['referral', 'referred', 'direction', 'inbound from', 'priority', 'whatsapp']
-  // Sheet1 = inbound contacts
-  const inboundKw  = ['inbound contact', 'inbound lead', 'sheet1', 'logged by', 'notes']
-
-  if (dealKw.some(k => q.includes(k)))     return ['Team meetings']
-  if (outboundKw.some(k => q.includes(k))) return ['Outbound Contacts']
-  if (referralKw.some(k => q.includes(k))) return ['Referrals']
-  if (inboundKw.some(k => q.includes(k)))  return ['Sheet1']
-
-  // Default for company-specific or generic sheet questions: check Team meetings first
-  return ['Team meetings']
-}
-
-function filterByCompany(records, company) {
-  if (!company) return records
-  const c = company.toLowerCase()
-  return records.filter(r =>
-    Object.values(r).some(v => typeof v === 'string' && v.toLowerCase().includes(c))
-  )
-}
-
-// ─── Tool export ─────────────────────────────────────────────────────────────
 export const sheetQueryTool = {
   id: 'sheet_query',
+
   description:
-    'Queries the WEH Ventures deal-tracking Google Sheet. The sheet has 4 tabs:\n' +
-    '(1) "Team meetings" tab — THIS IS THE MAIN DEAL PIPELINE/EVALUATION SHEET. Columns: Company, Date, POC, Sector, Status (Pass/IC/Track/Founder watch), "Why is this exciting?", Risks, "Conviction Score (on 10)", "Reasons for Pass", "Reasons to watch", "Action required". Use for deal status, conviction scores, pass/watch reasons, portfolio questions.\n' +
-    '(2) "Outbound Contacts" tab — Outbound outreach log. Columns: Date, Name, Company Name, Industry, Description, Logged By, Reverted?, Email, Remarks, Team Meeting.\n' +
-    '(3) "Referrals" tab — Referral tracking. Columns: Date, Name, Company Name, Industry, Description, Direction (Inbound/Outbound), Logged By, Reverted?, Email, Remarks, Priority, Team Meeting.\n' +
-    '(4) "Sheet1" tab — Inbound contacts log. Columns: Name, Industry, Description, Logged By, Team Meeting, Notes.\n' +
-    'Use this tool when the user asks about: conviction scores, deal statuses, pass/watch reasons, POC, outbound contacts, referrals, or anything from "the sheet".',
+    'Queries the WEH Ventures deal-tracking Google Sheet. ' +
+    'You MUST always specify the "tab" parameter. ' +
+    'For cross-tab questions (e.g. "compare inbound vs outbound"), call this tool multiple times.\n\n' +
+    'Tab schemas (exact column names):\n\n' +
+    '(1) tab="Sheet1" — INBOUND contacts log.\n' +
+    '    Columns: Timestamp (date), Name, Industry, Description, Logged By, Team Meeting, Notes.\n' +
+    '    Use for: inbound leads, who logged what, lead descriptions and notes.\n\n' +
+    '(2) tab="Outbound Contacts" — Outbound outreach log.\n' +
+    '    Columns: Date, Name, Company Name, Industry, Description, Logged By, Reverted?, Email, Remarks, Team Meeting.\n' +
+    '    Use for: outbound contacts, outreach activity, who we reached out to.\n\n' +
+    '(3) tab="Referrals" — Referral tracking.\n' +
+    '    Columns: Date, Name, Company Name, Industry, Description, Direction (Inbound/Outbound), Logged By, Reverted?, Email, Remarks, Priority, Team Meeting.\n' +
+    '    Use for: referrals, direction of referrals, priority contacts.\n\n' +
+    '(4) tab="Team meetings" — Deal pipeline evaluations.\n' +
+    '    Columns: Company, Date, POC, Sector, Status (Pass/IC/Track/Founder watch), "Why is this exciting?", Risks, "Conviction Score (on 10)", "Reasons for Pass", "Reasons to watch", "Action required".\n' +
+    '    Use for: conviction scores, deal pipeline status, pass/watch reasons, IC decisions, sector analysis.\n\n' +
+    'Filters: use filterMonth (e.g. "March"), filterYear (e.g. "2025"), filterKeyword (company name or text) to narrow results.',
+
   inputSchema: {
     type: 'object',
     properties: {
-      query:   { type: 'string', description: "The user's question to answer from the sheet" },
-      company: { type: 'string', description: 'Optional: filter to rows mentioning this company' },
-      tab:     { type: 'string', description: 'Optional: "Sheet1", "Outbound Contacts", "Referrals", or "Team meetings". Leave blank for auto-detect.' }
+      query: {
+        type: 'string',
+        description: "The user's question"
+      },
+      tab: {
+        type: 'string',
+        description: 'REQUIRED. One of: "Sheet1", "Outbound Contacts", "Referrals", "Team meetings"'
+      },
+      filterMonth: {
+        type: 'string',
+        description: 'Optional. Month name to filter by, e.g. "March", "January"'
+      },
+      filterYear: {
+        type: 'string',
+        description: 'Optional. 4-digit year to filter by, e.g. "2025"'
+      },
+      filterKeyword: {
+        type: 'string',
+        description: 'Optional. Company name or keyword to filter across all columns'
+      },
     },
-    required: ['query']
+    required: ['query', 'tab']
   },
 
   async execute({ input }) {
-    const query   = input?.query   ?? ''
-    const company = input?.company ?? null
-    const tabHint = input?.tab     ?? null
+    const { tab, filterMonth, filterYear, filterKeyword } = input ?? {}
 
-    let allData
+    if (!tab) {
+      return {
+        sheetContext:
+          'Error: "tab" parameter is required. ' +
+          'Must be one of: "Sheet1", "Outbound Contacts", "Referrals", "Team meetings"'
+      }
+    }
+
+    console.log(
+      `[sheetQueryTool] tab="${tab}"` +
+      (filterMonth   ? ` month="${filterMonth}"`   : '') +
+      (filterYear    ? ` year="${filterYear}"`    : '') +
+      (filterKeyword ? ` keyword="${filterKeyword}"` : '')
+    )
+
     try {
-      allData = await loadAllTabs()
+      const result = await runPythonQuery({ tab, filterMonth, filterYear, filterKeyword })
+
+      if (result.error) {
+        console.error('[sheetQueryTool] Python returned error:', result.error)
+        return { sheetContext: `Sheet query error: ${result.error}` }
+      }
+
+      const formatted = formatRowsForLLM(result)
+      return { sheetContext: formatted }
+
     } catch (err) {
-      console.error('[sheetQueryTool] Failed to load sheet:', err.message)
-      return { sheetContext: `Failed to load sheet data: ${err.message}` }
+      console.error('[sheetQueryTool] Execution error:', err.message)
+      return { sheetContext: `Failed to query sheet: ${err.message}` }
     }
-
-    const tabsToShow = (tabHint && allData[tabHint])
-      ? [tabHint]
-      : selectRelevantTabs(query)
-
-    let sheetContext = ''
-    for (const tabName of tabsToShow) {
-      let records = allData[tabName] ?? []
-      if (company) records = filterByCompany(records, company)
-      sheetContext += formatTabAsText(tabName, records) + '\n'
-    }
-
-    return { sheetContext: sheetContext.trim() || 'No relevant sheet data found.' }
   }
 }
