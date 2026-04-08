@@ -653,6 +653,22 @@ router.post('/:id/meeting', async (req, res) => {
       )
       RETURNING *
     `
+
+    // Keep deals table synchronized for meeting note fields (like we do for PATCH)
+    await sql`
+      UPDATE deals
+      SET 
+        status = COALESCE(${status ?? null}, status),
+        exciting_reason = COALESCE(${exciting_reason ?? null}, exciting_reason),
+        risks = COALESCE(${risks ?? null}, risks),
+        conviction_score = COALESCE(${conviction_score ?? null}, conviction_score),
+        pass_reasons = COALESCE(${pass_reasons ?? null}, pass_reasons),
+        watch_reasons = COALESCE(${watch_reasons ?? null}, watch_reasons),
+        action_required = COALESCE(${action_required ?? null}, action_required),
+        updated_at = now()
+      WHERE id = ${deal.id}
+    `.catch(e => console.error('Error syncing to deals:', e))
+
     return res.status(201).json(rows[0])
   } catch (err) {
     console.error('Error creating deal meeting', err)
