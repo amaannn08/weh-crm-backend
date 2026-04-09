@@ -15,43 +15,165 @@ export async function ingestRssForCompany(company) {
     [company.id]
   )
 
+  if (!sources.length) {
+    console.log('[rss] No active sources for company', {
+      companyId: company.id,
+      slug: company.slug,
+      name: company.name
+    })
+  } else {
+    console.log('[rss] Active sources for company', {
+      companyId: company.id,
+      slug: company.slug,
+      name: company.name,
+      sourceCount: sources.length
+    })
+  }
+
   let totalSaved = 0
 
   for (const source of sources) {
     try {
-      const feed = await parser.parseURL(source.feed_url)
-      const relevant = feed.items.filter((item) => isRelevant(item, company.name))
+      console.log('[rss] Fetching feed', {
+        companySlug: company.slug,
+        companyName: company.name,
+        sourceId: source.id,
+        feedUrl: source.feed_url,
+        label: source.label
+      })
 
-      for (const item of relevant) {
-        const saved = await upsertNewsItem({
+      const feed = await parser.parseURL(source.feed_url)
+
+      console.log('[rss] Feed fetched', {
+        companySlug: company.slug,
+        companyName: company.name,
+        sourceId: source.id,
+        feedUrl: source.feed_url,
+        itemCount: feed.items?.length ?? 0
+      })
+
+      const matches = (feed.items || [])
+        .map((item) => ({ item, matchedVariant: matchVariant(item, company) }))
+        .filter((x) => x.matchedVariant)
+
+      console.log('[rss] Relevant items', {
+        companySlug: company.slug,
+        companyName: company.name,
+        sourceId: source.id,
+        feedUrl: source.feed_url,
+        relevantCount: matches.length
+      })
+
+      if (matches.length > 0) {
+        const sample = matches.slice(0, 3).map(({ item, matchedVariant }) => ({
+          title: item.title?.trim() || null,
+          link: item.link || null,
+          matchedVariant
+        }))
+        console.log('[rss] Relevant sample', {
+          companySlug: company.slug,
+          companyName: company.name,
+          sourceId: source.id,
+          feedUrl: source.feed_url,
+          sample
+        })
+      }
+
+      let inserted = 0
+      let deduped = 0
+      let skippedNoTitle = 0
+
+      for (const { item, matchedVariant } of matches) {
+        const result = await upsertNewsItem({
           company,
           sourceType: 'rss',
           sourceLabel: source.label || feed.title,
           title: item.title?.trim(),
           rawSummary: stripHtml(item.contentSnippet || item.summary || ''),
           externalUrl: item.link,
-          publishedAt: item.pubDate ? new Date(item.pubDate) : new Date()
+          publishedAt: item.pubDate ? new Date(item.pubDate) : new Date(),
+          matchedVariant
         })
-        if (saved) totalSaved += 1
+
+        if (result.inserted) {
+          totalSaved += 1
+          inserted += 1
+        } else if (result.reason === 'no_title') {
+          skippedNoTitle += 1
+        } else if (result.reason === 'dedup') {
+          deduped += 1
+        }
+      }
+
+      if (matches.length > 0) {
+        console.log('[rss] Feed upsert summary', {
+          companySlug: company.slug,
+          companyName: company.name,
+          sourceId: source.id,
+          feedUrl: source.feed_url,
+          matched: matches.length,
+          inserted,
+          deduped,
+          skippedNoTitle
+        })
       }
 
       await query('UPDATE rss_sources SET last_fetched_at=NOW() WHERE id=$1', [source.id])
     } catch (err) {
-      console.error(`[rss] Failed to fetch ${source.feed_url}:`, err.message)
+      console.error('[rss] Failed to fetch feed', {
+        companySlug: company.slug,
+        companyName: company.name,
+        sourceId: source.id,
+        feedUrl: source.feed_url,
+        error: err?.message || String(err)
+      })
     }
   }
 
   return totalSaved
 }
 
-function isRelevant(item, companyName) {
+function normalizeToken(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function companyVariants(company) {
+  const variants = new Set()
+
+  const name = normalizeToken(company.name)
+  const slug = normalizeToken(company.slug).replace(/-/g, ' ')
+
+  if (name) variants.add(name)
+  if (slug) variants.add(slug)
+
+  const firstWord = name.split(' ')[0]
+  if (firstWord && firstWord.length > 2) variants.add(firstWord)
+
+  // Handle parentheses, e.g. "Magma (Taozen)" → "magma", "taozen"
+  const noParen = name.replace(/\s*\([^)]*\)\s*/g, ' ').replace(/\s+/g, ' ').trim()
+  if (noParen) variants.add(noParen)
+  const paren = name.match(/\(([^)]+)\)/)?.[1]
+  if (paren) variants.add(normalizeToken(paren))
+
+  // Extra slug forms
+  const slugNoSpaces = normalizeToken(company.slug).replace(/-/g, '')
+  if (slugNoSpaces.length > 2) variants.add(slugNoSpaces)
+
+  return Array.from(variants).filter((v) => v.length > 2)
+}
+
+function matchVariant(item, company) {
   const haystack = [item.title || '', item.contentSnippet || '', item.summary || '']
     .join(' ')
-    .toLowerCase()
+  const text = normalizeToken(haystack)
 
-  const variants = [companyName.toLowerCase(), companyName.split(/\s+/)[0].toLowerCase()]
-
-  return variants.some((v) => v.length > 2 && haystack.includes(v))
+  for (const v of companyVariants(company)) {
+    if (text.includes(v)) return v
+  }
+  return null
 }
 
 export async function upsertNewsItem({
@@ -61,9 +183,10 @@ export async function upsertNewsItem({
   title,
   rawSummary,
   externalUrl,
-  publishedAt
+  publishedAt,
+  matchedVariant
 }) {
-  if (!title) return false
+  if (!title) return { inserted: false, reason: 'no_title' }
 
   const hash = crypto
     .createHash('sha256')
@@ -95,7 +218,25 @@ export async function upsertNewsItem({
     ]
   )
 
-  return rowCount > 0
+  if (rowCount > 0) {
+    if (matchedVariant) {
+      console.log('[rss] Inserted item', {
+        companySlug: company.slug,
+        companyName: company.name,
+        matchedVariant,
+        title: title.slice(0, 200),
+        externalUrl: externalUrl || null
+      })
+    }
+    return { inserted: true }
+  }
+
+  // Distinguish dedup vs other no-op by checking the hash.
+  const { rows } = await query('SELECT 1 FROM news_items WHERE dedup_hash=$1 LIMIT 1', [hash])
+  if (rows?.length) {
+    return { inserted: false, reason: 'dedup' }
+  }
+  return { inserted: false, reason: 'no_change' }
 }
 
 function stripHtml(html) {

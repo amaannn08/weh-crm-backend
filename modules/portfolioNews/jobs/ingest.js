@@ -20,7 +20,11 @@ export async function runIngest() {
   const scrapeTargetsCount = Number(scrapeTargetsRows?.rows?.[0]?.count ?? 0)
 
   if (companiesCount === 0 || rssSourcesCount === 0 || scrapeTargetsCount === 0) {
-    console.log('[ingest] Seed data missing — running portfolio news seed before ingest')
+    console.log('[ingest] Seed data missing — running portfolio news seed before ingest', {
+      companiesCount,
+      rssSourcesCount,
+      scrapeTargetsCount
+    })
     await seedPortfolioNews()
   }
 
@@ -35,13 +39,29 @@ export async function runIngest() {
 
   for (const company of companies) {
     try {
+      console.log('[ingest] Processing company', {
+        id: company.id,
+        slug: company.slug,
+        name: company.name,
+        fund: company.fund,
+        status: company.status
+      })
+
       const rssCount = await ingestRssForCompany(company)
       const scrapeCount = await scrapeForCompany(company)
+
+      console.log('[ingest] Company result', {
+        slug: company.slug,
+        name: company.name,
+        rssCount,
+        scrapeCount
+      })
+
       totalRss += rssCount
       totalScrape += scrapeCount
       await sleep(1000 + Math.random() * 1000)
     } catch (err) {
-      console.error(`[ingest] Error processing ${company.name}:`, err.message)
+      console.error(`[ingest] Error processing ${company.name}:`, err)
       errors += 1
     }
   }

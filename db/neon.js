@@ -335,12 +335,17 @@ export async function initSchema() {
       $$ LANGUAGE plpgsql;
     `)
 
+    // Trigger creation can race if multiple processes call initSchema concurrently.
     await client.query('DROP TRIGGER IF EXISTS trg_companies_updated_at ON companies')
-    await client.query(`
-      CREATE TRIGGER trg_companies_updated_at
-      BEFORE UPDATE ON companies
-      FOR EACH ROW EXECUTE FUNCTION update_updated_at()
-    `)
+    try {
+      await client.query(`
+        CREATE TRIGGER trg_companies_updated_at
+        BEFORE UPDATE ON companies
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+      `)
+    } catch (err) {
+      if (err?.code !== '42710') throw err // duplicate_object
+    }
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS newsletter_issues (
@@ -393,17 +398,25 @@ export async function initSchema() {
     await client.query('CREATE INDEX IF NOT EXISTS idx_segments_issue    ON newsletter_segments(issue_id)')
     await client.query('CREATE INDEX IF NOT EXISTS idx_issues_status     ON newsletter_issues(status)')
     await client.query('DROP TRIGGER IF EXISTS trg_issues_updated_at ON newsletter_issues')
-    await client.query(`
-      CREATE TRIGGER trg_issues_updated_at
-      BEFORE UPDATE ON newsletter_issues
-      FOR EACH ROW EXECUTE FUNCTION update_updated_at()
-    `)
+    try {
+      await client.query(`
+        CREATE TRIGGER trg_issues_updated_at
+        BEFORE UPDATE ON newsletter_issues
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+      `)
+    } catch (err) {
+      if (err?.code !== '42710') throw err
+    }
     await client.query('DROP TRIGGER IF EXISTS trg_segments_updated_at ON newsletter_segments')
-    await client.query(`
-      CREATE TRIGGER trg_segments_updated_at
-      BEFORE UPDATE ON newsletter_segments
-      FOR EACH ROW EXECUTE FUNCTION update_updated_at()
-    `)
+    try {
+      await client.query(`
+        CREATE TRIGGER trg_segments_updated_at
+        BEFORE UPDATE ON newsletter_segments
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+      `)
+    } catch (err) {
+      if (err?.code !== '42710') throw err
+    }
   } catch (err) {
     const isTimeout =
       err.message?.includes('fetch failed') ||

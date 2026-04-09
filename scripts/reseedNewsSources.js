@@ -1,6 +1,9 @@
 /**
- * Clears broken RSS sources (Entrackr 404) and stale Tracxn scrape targets,
- * then re-seeds with working URLs from seed.js.
+ * Cleans up known-problematic sources/targets, then re-seeds with defaults from seed.js.
+ *
+ * IMPORTANT:
+ * - We no longer delete Entrackr by default (manager parity). If Entrackr is flaky, deactivate it instead.
+ * - Tracxn often needs JS/auth; we deactivate those scrape targets by default.
  *
  * Run: node scripts/reseedNewsSources.js
  */
@@ -11,20 +14,15 @@ import { seedPortfolioNews } from '../modules/portfolioNews/jobs/seed.js'
 
 await initSchema()
 
-// Remove Entrackr (dead) and Tracxn (requires JS/auth) sources
-const { rowCount: rssDeleted } = await query(
-    `DELETE FROM rss_sources WHERE feed_url LIKE '%entrackr.com%'`
+// Deactivate Tracxn scrape targets by default (often blocked / JS required).
+const { rowCount: tracxnDeactivated } = await query(
+  `UPDATE scrape_targets SET active=FALSE WHERE url LIKE '%tracxn.com%'`
 )
-console.log(`Removed ${rssDeleted} broken Entrackr RSS source(s)`)
+console.log(`Deactivated ${tracxnDeactivated} Tracxn scrape target(s)`)
 
-const { rowCount: scrapeDeleted } = await query(
-    `DELETE FROM scrape_targets WHERE url LIKE '%tracxn.com%' OR url LIKE '%mitigata.com%'`
-)
-console.log(`Removed ${scrapeDeleted} non-working scrape target(s)`)
+// Keep Mitigata and Entrackr; if needed, deactivate explicitly in DB instead of deleting.
 
-// Force re-seed of rss_sources (set count to 0 by deleting all, then seed will repopulate)
-// We only touch sources that were broken - add missing ones via seed
-console.log('\nRe-seeding RSS sources...')
+console.log('\nSyncing portfolio news seed (companies + RSS + scrape targets)...')
 const result = await seedPortfolioNews()
 console.log('Seed result:', JSON.stringify(result, null, 2))
 

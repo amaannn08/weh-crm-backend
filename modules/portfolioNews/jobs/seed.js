@@ -39,26 +39,178 @@ const COMPANIES = [
 ]
 
 const RSS_SOURCES = [
-  { slug: 'jar', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }, { url: 'https://startupnews.fyi/feed/', label: 'StartupNews' }] },
-  { slug: 'mitigata', feeds: [{ url: 'https://yourstory.com/feed', label: 'YourStory' }, { url: 'https://inc42.com/feed/', label: 'Inc42' }] },
-  { slug: 'masterchow', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://startupnews.fyi/feed/', label: 'StartupNews' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'unbox-robotics', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'smallcase', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'fragaria', feeds: [{ url: 'https://startupnews.fyi/feed/', label: 'StartupNews' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'pratilipi', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'animall', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'apps-for-bharat', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'noto', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'segmind', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'mitigata', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }] },
-  { slug: 'clinikk', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] },
-  { slug: 'hastin', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://startupnews.fyi/feed/', label: 'StartupNews' }] },
-  { slug: 'sustvest', feeds: [{ url: 'https://inc42.com/feed/', label: 'Inc42' }, { url: 'https://yourstory.com/feed', label: 'YourStory' }] }
+  // Restored closer to manager seed (includes Entrackr).
+  // Note: some feeds can be flaky; keep them here for parity and manage via rss_sources.active.
+  {
+    slug: 'jar',
+    feeds: [
+      { url: 'https://entrackr.com/feed/', label: 'Entrackr' },
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' },
+      { url: 'https://startupnews.fyi/feed/', label: 'StartupNews' }
+    ]
+  },
+  {
+    slug: 'mitigata',
+    feeds: [
+      { url: 'https://yourstory.com/feed', label: 'YourStory' },
+      { url: 'https://entrackr.com/feed/', label: 'Entrackr' },
+      { url: 'https://inc42.com/feed/', label: 'Inc42' }
+    ]
+  },
+  {
+    slug: 'masterchow',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://startupnews.fyi/feed/', label: 'StartupNews' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'unbox-robotics',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://entrackr.com/feed/', label: 'Entrackr' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'smallcase',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://entrackr.com/feed/', label: 'Entrackr' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'fragaria',
+    feeds: [
+      { url: 'https://entrackr.com/feed/', label: 'Entrackr' },
+      { url: 'https://startupnews.fyi/feed/', label: 'StartupNews' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'pratilipi',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'animall',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://entrackr.com/feed/', label: 'Entrackr' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'apps-for-bharat',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'noto',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://entrackr.com/feed/', label: 'Entrackr' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'clinikk',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'hastin',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://startupnews.fyi/feed/', label: 'StartupNews' }
+    ]
+  },
+  {
+    slug: 'sustvest',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  },
+  {
+    slug: 'segmind',
+    feeds: [
+      { url: 'https://inc42.com/feed/', label: 'Inc42' },
+      { url: 'https://yourstory.com/feed', label: 'YourStory' }
+    ]
+  }
 ]
 
-// Scrape targets intentionally minimal — sites like Tracxn require JS rendering/auth
-// and cannot be scraped with plain HTTP. Add custom targets via POST /admin/sources/rss
-const SCRAPE_TARGETS = []
+// Global startup/news feeds requested for all active portfolio companies.
+// For domains where RSS is uncertain/paywalled, we use best-known feed endpoints.
+const GLOBAL_RSS_FEEDS = [
+  { url: 'https://yourstory.com/feed', label: 'YourStory' },
+  { url: 'https://inc42.com/feed/', label: 'Inc42' },
+  { url: 'https://entrackr.com/feed/', label: 'Entrackr' },
+  { url: 'https://indianstartupnews.com/feed/', label: 'IndianStartupNews' },
+  { url: 'https://startuptalky.com/feed/', label: 'StartupTalky' },
+  { url: 'https://www.vccircle.com/feed', label: 'VCCircle' },
+  { url: 'https://the-ken.com/feed/', label: 'The Ken' },
+  { url: 'https://economictimes.indiatimes.com/rssfeedsdefault.cms', label: 'Economic Times Tech' },
+  { url: 'https://startupsindia.in/feed/', label: 'StartupsIndia' },
+  { url: 'https://www.indianstartuptimes.com/feed/', label: 'IndianStartupTimes' },
+  { url: 'https://techcrunch.com/feed/', label: 'TechCrunch' },
+  { url: 'https://www.techinasia.com/feed', label: 'Tech in Asia' },
+  { url: 'https://news.crunchbase.com/feed/', label: 'Crunchbase News' }
+]
+
+// Scrape targets restored for manager parity.
+// Note: Tracxn often requires JS/auth; keep for parity and manage via scrape_targets.active.
+const SCRAPE_TARGETS = [
+  {
+    slug: 'jar',
+    targets: [
+      {
+        url: 'https://tracxn.com/d/companies/jar/__ibL9_Xt00ht7HltPcSqQd5wytBeNd-k4RqgCCt3e3YY/news',
+        label: 'Tracxn — Jar',
+        article_selector: '.news-item, .feed-item',
+        title_selector: 'a.news-title, h3 a',
+        summary_selector: '.news-snippet, p',
+        date_selector: 'time, .news-date'
+      }
+    ]
+  },
+  {
+    slug: 'mitigata',
+    targets: [
+      {
+        url: 'https://mitigata.com/company/media',
+        label: 'Mitigata Press',
+        article_selector: '.media-item, article',
+        title_selector: 'h2 a, h3 a, a',
+        summary_selector: 'p',
+        date_selector: 'time, .date'
+      }
+    ]
+  },
+  {
+    slug: 'masterchow',
+    targets: [
+      {
+        url: 'https://tracxn.com/d/companies/masterchow/__news',
+        label: 'Tracxn — Masterchow',
+        article_selector: '.news-item',
+        title_selector: 'a.news-title',
+        summary_selector: '.news-snippet',
+        date_selector: 'time'
+      }
+    ]
+  }
+]
 
 let currentSeedPromise = null
 
@@ -82,71 +234,87 @@ export async function seedPortfolioNews() {
       scrape_targets: false
     }
 
-    if (companiesCount === 0) {
-      for (const co of COMPANIES) {
+    // Always upsert companies and ensure default sources/targets exist.
+    for (const co of COMPANIES) {
+      await query(
+        `
+        INSERT INTO companies (slug, name, fund, sector, stage, status, logo_initials, logo_color)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT (slug) DO UPDATE SET
+          name=EXCLUDED.name,
+          fund=EXCLUDED.fund,
+          sector=EXCLUDED.sector,
+          stage=EXCLUDED.stage,
+          status=EXCLUDED.status,
+          logo_initials=EXCLUDED.logo_initials,
+          logo_color=EXCLUDED.logo_color
+      `,
+        [co.slug, co.name, co.fund, co.sector, co.stage, co.status, co.logo_initials, co.logo_color]
+      )
+    }
+    seeded.companies = companiesCount === 0
+
+    // Attach global feeds for every active/exited portfolio company.
+    for (const co of COMPANIES) {
+      if (co.status === 'written-off') continue
+      const { rows: companyRows } = await query('SELECT id FROM companies WHERE slug=$1', [co.slug])
+      const companyId = companyRows?.[0]?.id
+      if (!companyId) continue
+
+      for (const feed of GLOBAL_RSS_FEEDS) {
         await query(
           `
-          INSERT INTO companies (slug, name, fund, sector, stage, status, logo_initials, logo_color)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-          ON CONFLICT (slug) DO UPDATE SET
-            name=EXCLUDED.name,
-            fund=EXCLUDED.fund,
-            sector=EXCLUDED.sector,
-            stage=EXCLUDED.stage,
-            status=EXCLUDED.status,
-            logo_initials=EXCLUDED.logo_initials,
-            logo_color=EXCLUDED.logo_color
+          INSERT INTO rss_sources (company_id, feed_url, label)
+          SELECT $1,$2,$3
+          WHERE NOT EXISTS (
+            SELECT 1 FROM rss_sources WHERE company_id=$1 AND feed_url=$2
+          )
         `,
-          [co.slug, co.name, co.fund, co.sector, co.stage, co.status, co.logo_initials, co.logo_color]
+          [companyId, feed.url, feed.label || null]
         )
       }
-      seeded.companies = true
     }
 
-    if (rssSourcesCount === 0) {
-      for (const { slug, feeds } of RSS_SOURCES) {
-        const { rows: companyRows } = await query('SELECT id FROM companies WHERE slug=$1', [slug])
-        const companyId = companyRows?.[0]?.id
-        if (!companyId) continue
+    for (const { slug, feeds } of RSS_SOURCES) {
+      const { rows: companyRows } = await query('SELECT id FROM companies WHERE slug=$1', [slug])
+      const companyId = companyRows?.[0]?.id
+      if (!companyId) continue
 
-        for (const feed of feeds) {
-          await query(
-            `
-            INSERT INTO rss_sources (company_id, feed_url, label)
-            SELECT $1,$2,$3
-            WHERE NOT EXISTS (
-              SELECT 1 FROM rss_sources WHERE company_id=$1 AND feed_url=$2
-            )
-          `,
-            [companyId, feed.url, feed.label || null]
+      for (const feed of feeds) {
+        await query(
+          `
+          INSERT INTO rss_sources (company_id, feed_url, label)
+          SELECT $1,$2,$3
+          WHERE NOT EXISTS (
+            SELECT 1 FROM rss_sources WHERE company_id=$1 AND feed_url=$2
           )
-        }
+        `,
+          [companyId, feed.url, feed.label || null]
+        )
       }
-      seeded.rss_sources = true
     }
+    seeded.rss_sources = rssSourcesCount === 0
 
-    if (scrapeTargetsCount === 0) {
-      for (const { slug, targets } of SCRAPE_TARGETS) {
-        const { rows: companyRows } = await query('SELECT id FROM companies WHERE slug=$1', [slug])
-        const companyId = companyRows?.[0]?.id
-        if (!companyId) continue
+    for (const { slug, targets } of SCRAPE_TARGETS) {
+      const { rows: companyRows } = await query('SELECT id FROM companies WHERE slug=$1', [slug])
+      const companyId = companyRows?.[0]?.id
+      if (!companyId) continue
 
-        for (const t of targets) {
-          await query(
-            `
-            INSERT INTO scrape_targets
-              (company_id, url, label, article_selector, title_selector, summary_selector, date_selector)
-            SELECT $1,$2,$3,$4,$5,$6,$7
-            WHERE NOT EXISTS (
-              SELECT 1 FROM scrape_targets WHERE company_id=$1 AND url=$2
-            )
-          `,
-            [companyId, t.url, t.label || null, t.article_selector, t.title_selector, t.summary_selector, t.date_selector]
+      for (const t of targets) {
+        await query(
+          `
+          INSERT INTO scrape_targets
+            (company_id, url, label, article_selector, title_selector, summary_selector, date_selector)
+          SELECT $1,$2,$3,$4,$5,$6,$7
+          WHERE NOT EXISTS (
+            SELECT 1 FROM scrape_targets WHERE company_id=$1 AND url=$2
           )
-        }
+        `,
+          [companyId, t.url, t.label || null, t.article_selector, t.title_selector, t.summary_selector, t.date_selector]
+        )
       }
-      seeded.scrape_targets = true
     }
+    seeded.scrape_targets = scrapeTargetsCount === 0
 
     const [companiesAfterRows, rssAfterRows, scrapeAfterRows] = await Promise.all([
       query('SELECT COUNT(*)::int AS count FROM companies'),

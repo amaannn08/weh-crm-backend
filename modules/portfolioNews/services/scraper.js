@@ -12,13 +12,59 @@ export async function scrapeForCompany(company) {
     [company.id]
   )
 
+  if (!targets.length) {
+    console.log('[scrape] No active scrape targets for company', {
+      companyId: company.id,
+      slug: company.slug,
+      name: company.name
+    })
+  } else {
+    console.log('[scrape] Active scrape targets for company', {
+      companyId: company.id,
+      slug: company.slug,
+      name: company.name,
+      targetCount: targets.length
+    })
+  }
+
   let totalSaved = 0
 
   for (const target of targets) {
     try {
-      const articles = await scrapePage(target)
+      console.log('[scrape] Fetching page', {
+        companySlug: company.slug,
+        companyName: company.name,
+        targetId: target.id,
+        url: target.url,
+        label: target.label
+      })
+
+      const { articles, status, finalUrl } = await scrapePage(target)
+
+      console.log('[scrape] Parsed articles', {
+        companySlug: company.slug,
+        companyName: company.name,
+        targetId: target.id,
+        url: target.url,
+        status,
+        finalUrl,
+        articleCount: articles.length
+      })
+      if (articles.length > 0) {
+        console.log('[scrape] Article sample', {
+          companySlug: company.slug,
+          companyName: company.name,
+          targetId: target.id,
+          url: target.url,
+          sample: articles.slice(0, 3).map((a) => ({ title: a.title, url: a.url }))
+        })
+      }
+
+      let inserted = 0
+      let deduped = 0
+      let skippedNoTitle = 0
       for (const article of articles) {
-        const saved = await upsertNewsItem({
+        const result = await upsertNewsItem({
           company,
           sourceType: 'scrape',
           sourceLabel: target.label,
@@ -27,11 +73,36 @@ export async function scrapeForCompany(company) {
           externalUrl: article.url,
           publishedAt: article.publishedAt || new Date()
         })
-        if (saved) totalSaved += 1
+        if (result.inserted) {
+          totalSaved += 1
+          inserted += 1
+        } else if (result.reason === 'dedup') {
+          deduped += 1
+        } else if (result.reason === 'no_title') {
+          skippedNoTitle += 1
+        }
+      }
+      if (articles.length > 0) {
+        console.log('[scrape] Target upsert summary', {
+          companySlug: company.slug,
+          companyName: company.name,
+          targetId: target.id,
+          url: target.url,
+          articleCount: articles.length,
+          inserted,
+          deduped,
+          skippedNoTitle
+        })
       }
       await query('UPDATE scrape_targets SET last_scraped_at=NOW() WHERE id=$1', [target.id])
     } catch (err) {
-      console.error(`[scrape] Failed ${target.url}:`, err.message)
+      console.error('[scrape] Failed target', {
+        companySlug: company.slug,
+        companyName: company.name,
+        targetId: target.id,
+        url: target.url,
+        error: err?.message || String(err)
+      })
     }
   }
 
@@ -48,6 +119,11 @@ async function scrapePage(target) {
     },
     maxRedirects: 5
   })
+
+  const finalUrl =
+    response?.request?.res?.responseUrl ||
+    response?.request?._redirectable?._currentUrl ||
+    target.url
 
   const $ = cheerio.load(response.data)
   const articles = []
@@ -68,7 +144,7 @@ async function scrapePage(target) {
     articles.push({ title, url, summary, publishedAt })
   })
 
-  return articles
+  return { articles, status: response.status, finalUrl }
 }
 
 function resolveUrl(href, baseUrl) {
