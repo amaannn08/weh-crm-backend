@@ -279,6 +279,36 @@ export async function initSchema() {
     `)
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS deal_identity_ambiguities (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        source_type TEXT NOT NULL CHECK (source_type IN ('upload','drive','docs','csv')),
+        source_file_id TEXT,
+        source_file_name TEXT,
+        extracted_company TEXT,
+        normalized_company TEXT,
+        extracted_domain TEXT,
+        candidate_deal_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+        pending_deal_id UUID REFERENCES deals(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending','resolved','ignored')),
+        resolved_deal_id UUID REFERENCES deals(id) ON DELETE SET NULL,
+        resolution_method TEXT,
+        payload JSONB,
+        error TEXT,
+        resolved_by TEXT,
+        resolved_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+    await client.query(
+      'CREATE INDEX IF NOT EXISTS idx_deal_identity_ambiguities_status ON deal_identity_ambiguities(status)'
+    )
+    await client.query(
+      'CREATE INDEX IF NOT EXISTS idx_deal_identity_ambiguities_created_at ON deal_identity_ambiguities(created_at DESC)'
+    )
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS companies (
         id            SERIAL PRIMARY KEY,
         slug          TEXT UNIQUE NOT NULL,
@@ -444,6 +474,16 @@ export async function initSchema() {
       await client.query(`
         CREATE TRIGGER trg_drive_ingestion_status_updated_at
         BEFORE UPDATE ON drive_transcript_ingestion_status
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+      `)
+    } catch (err) {
+      if (err?.code !== '42710') throw err
+    }
+    await client.query('DROP TRIGGER IF EXISTS trg_deal_identity_ambiguities_updated_at ON deal_identity_ambiguities')
+    try {
+      await client.query(`
+        CREATE TRIGGER trg_deal_identity_ambiguities_updated_at
+        BEFORE UPDATE ON deal_identity_ambiguities
         FOR EACH ROW EXECUTE FUNCTION update_updated_at()
       `)
     } catch (err) {

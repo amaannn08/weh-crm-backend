@@ -9,6 +9,10 @@ import {
   pickBestNonWehDomainFromTranscript,
   resolveCompanyNameFallback
 } from './companyIdentity.js'
+import {
+  evaluateDealIdentity,
+  createDealIdentityAmbiguity
+} from './dealIdentityResolution.js'
 
 async function findExistingMeeting(fileName) {
   const rows = await sql`
@@ -25,29 +29,6 @@ async function findExistingDealBySourceFile(fileName) {
     SELECT id
     FROM deals
     WHERE source_file_name = ${fileName}
-    LIMIT 1
-  `
-  return rows[0] ?? null
-}
-
-async function findExistingDealByCompanyName(companyName) {
-  const normalized = normalizeCompanyName(companyName)
-  if (!normalized) return null
-  const rows = await sql`
-    SELECT id
-    FROM deals
-    WHERE LOWER(TRIM(company)) = ${normalized}
-    LIMIT 1
-  `
-  return rows[0] ?? null
-}
-
-async function findExistingDealByCompanyDomain(companyDomain) {
-  if (!companyDomain) return null
-  const rows = await sql`
-    SELECT id
-    FROM deals
-    WHERE company_domain = ${companyDomain}
     LIMIT 1
   `
   return rows[0] ?? null
@@ -134,17 +115,16 @@ export async function ingestDocs({ limit, dryRun } = {}) {
 
       let dealId = existingDeal?.id
       let matchedExistingIdentity = false
+      let identityDecision = null
 
       if (!dealId) {
-        const byName = !companyMissing
-          ? await findExistingDealByCompanyName(extractedCompany)
-          : null
-        const byDomain = !byName && companyDomain
-          ? await findExistingDealByCompanyDomain(companyDomain)
-          : null
-        const identityMatch = byName || byDomain
-        if (identityMatch?.id) {
-          dealId = identityMatch.id
+        identityDecision = await evaluateDealIdentity({
+          extractedCompany,
+          companyDomain,
+          companyMissing
+        })
+        if (identityDecision.decision === 'resolved' && identityDecision.resolvedDealId) {
+          dealId = identityDecision.resolvedDealId
           matchedExistingIdentity = true
         }
       }
@@ -194,6 +174,23 @@ export async function ingestDocs({ limit, dryRun } = {}) {
           RETURNING *
         `
         dealId = dealRows[0].id
+
+        if (identityDecision?.decision === 'ambiguous') {
+          await createDealIdentityAmbiguity({
+            sourceType: 'docs',
+            sourceFileId: file.name,
+            sourceFileName: file.name,
+            extractedCompany: extraction.company || null,
+            normalizedCompany: normalizeCompanyName(extraction.company),
+            extractedDomain: companyDomain,
+            candidateDealIds: identityDecision.candidateDeals.map((deal) => deal.id),
+            pendingDealId: dealId,
+            payload: {
+              reason: identityDecision.reason,
+              founder_name: extraction.founder_name || null
+            }
+          })
+        }
       }
 
       await scoreAndSaveFounder({

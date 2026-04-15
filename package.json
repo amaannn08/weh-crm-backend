@@ -20,7 +20,7 @@
     "merge:duplicates": "node scripts/mergeDuplicateDeals.js",
     "news:ingest": "node scripts/ingestNews.js",
     "news:reseed-sources": "node scripts/reseedNewsSources.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test tests"
   },
   "keywords": [],
   "author": "",

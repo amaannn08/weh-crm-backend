@@ -22,6 +22,11 @@ import {
   pickBestNonWehDomainFromTranscript,
   resolveCompanyNameFallback
 } from '../services/companyIdentity.js'
+import { DealMergeError, mergeDealsTransactional } from '../services/dealMerge.js'
+import {
+  evaluateDealIdentity,
+  createDealIdentityAmbiguity
+} from '../services/dealIdentityResolution.js'
 
 const DEAL_PATCH_FIELDS = [
   'company',
@@ -266,22 +271,19 @@ router.post(
       const meetingDate = extraction.meeting_date || inferDateFromFilename(file.originalname) || null
       const vectorStr = formatVector(embedding)
 
-      // 3. Check if company already exists
+      // 3. Check if company already exists using production-safe identity logic
+      const identityDecision = await evaluateDealIdentity({
+        extractedCompany,
+        companyDomain,
+        companyMissing
+      })
+
       let existingDeal = null
-      if (!companyMissing) {
-        const normalized = normalizeCompanyName(extractedCompany)
-        const byName = await sql`
-          SELECT * FROM deals
-          WHERE LOWER(TRIM(company)) = ${normalized}
-          LIMIT 1
+      if (identityDecision.decision === 'resolved' && identityDecision.resolvedDealId) {
+        const byId = await sql`
+          SELECT * FROM deals WHERE id = ${identityDecision.resolvedDealId} LIMIT 1
         `
-        existingDeal = byName[0] ?? null
-      }
-      if (!existingDeal && companyDomain) {
-        const byDomain = await sql`
-          SELECT * FROM deals WHERE company_domain = ${companyDomain} LIMIT 1
-        `
-        existingDeal = byDomain[0] ?? null
+        existingDeal = byId[0] ?? null
       }
 
       // 4a. MERGE path — company already exists
@@ -412,10 +414,30 @@ router.post(
       await scoreAndSaveFounder({ dealId: newDeal.id, transcript, extraction })
 
       cleanup()
+      let ambiguityId = null
+      if (identityDecision.decision === 'ambiguous') {
+        const ambiguity = await createDealIdentityAmbiguity({
+          sourceType: 'upload',
+          sourceFileId: file.originalname,
+          sourceFileName: file.originalname,
+          extractedCompany: extraction.company || null,
+          normalizedCompany: normalizeCompanyName(extraction.company),
+          extractedDomain: companyDomain,
+          candidateDealIds: identityDecision.candidateDeals.map((deal) => deal.id),
+          pendingDealId: newDeal.id,
+          payload: {
+            reason: identityDecision.reason,
+            founder_name: extraction.founder_name || null
+          }
+        })
+        ambiguityId = ambiguity.id
+      }
+
       return res.status(201).json({
-        mode: 'created',
+        mode: identityDecision.decision === 'ambiguous' ? 'ambiguous' : 'created',
         dealId: newDeal.id,
-        company: newDeal.company
+        company: newDeal.company,
+        ambiguityId
       })
     } catch (err) {
       cleanup()
@@ -553,6 +575,136 @@ router.get('/', async (_req, res) => {
   } catch (err) {
     console.error('Error fetching deals', err)
     res.status(500).json({ error: 'Failed to fetch deals' })
+  }
+})
+
+router.post('/merge', async (req, res) => {
+  const dealIds = req.body?.dealIds
+  try {
+    const summary = await mergeDealsTransactional(poolRef, dealIds)
+    return res.json(summary)
+  } catch (err) {
+    if (err instanceof DealMergeError) {
+      return res.status(err.status).json({ error: err.message })
+    }
+    console.error('Error merging deals', err)
+    return res.status(500).json({ error: 'Failed to merge deals' })
+  }
+})
+
+router.get('/ambiguities/count', async (_req, res) => {
+  try {
+    const rows = await sql`
+      SELECT COUNT(*)::int AS count
+      FROM deal_identity_ambiguities
+      WHERE status = 'pending'
+    `
+    return res.json({ count: rows[0]?.count ?? 0 })
+  } catch (err) {
+    console.error('Error fetching deal ambiguity count', err)
+    return res.status(500).json({ error: 'Failed to fetch ambiguity count' })
+  }
+})
+
+router.get('/ambiguities', async (req, res) => {
+  const status = req.query?.status || 'pending'
+  try {
+    const rows = await sql`
+      SELECT *
+      FROM deal_identity_ambiguities
+      WHERE status = ${status}
+      ORDER BY created_at DESC
+      LIMIT 100
+    `
+    const ids = new Set()
+    for (const row of rows) {
+      if (row.pending_deal_id) ids.add(String(row.pending_deal_id))
+      const candidates = Array.isArray(row.candidate_deal_ids) ? row.candidate_deal_ids : []
+      for (const id of candidates) ids.add(String(id))
+    }
+    const allIds = [...ids]
+    const dealRows = allIds.length
+      ? await sql`SELECT id, company, company_domain, status, updated_at FROM deals WHERE id = ANY(${allIds}::uuid[])`
+      : []
+    const byId = new Map(dealRows.map((deal) => [String(deal.id), deal]))
+    const items = rows.map((row) => {
+      const candidateIds = Array.isArray(row.candidate_deal_ids) ? row.candidate_deal_ids : []
+      return {
+        ...row,
+        pendingDeal: row.pending_deal_id ? (byId.get(String(row.pending_deal_id)) ?? null) : null,
+        candidateDeals: candidateIds.map((id) => byId.get(String(id))).filter(Boolean)
+      }
+    })
+    return res.json({ items })
+  } catch (err) {
+    console.error('Error fetching deal ambiguities', err)
+    return res.status(500).json({ error: 'Failed to fetch ambiguities' })
+  }
+})
+
+router.post('/ambiguities/:id/resolve', async (req, res) => {
+  const { id } = req.params
+  const { action, dealId, resolvedBy } = req.body ?? {}
+  if (!action) return res.status(400).json({ error: 'action is required' })
+
+  try {
+    const ambiguityRows = await sql`
+      SELECT *
+      FROM deal_identity_ambiguities
+      WHERE id = ${id}
+      LIMIT 1
+    `
+    const ambiguity = ambiguityRows[0]
+    if (!ambiguity) return res.status(404).json({ error: 'Ambiguity not found' })
+    if (ambiguity.status !== 'pending') {
+      return res.status(400).json({ error: 'Ambiguity is already resolved' })
+    }
+
+    if (action === 'merge_into_existing') {
+      if (!dealId) return res.status(400).json({ error: 'dealId is required for merge action' })
+      if (!ambiguity.pending_deal_id) {
+        return res.status(400).json({ error: 'No pending deal is attached to this ambiguity' })
+      }
+
+      const summary = await mergeDealsTransactional(
+        poolRef,
+        [ambiguity.pending_deal_id, dealId],
+        { preferredPrimaryId: dealId }
+      )
+
+      await sql`
+        UPDATE deal_identity_ambiguities
+        SET
+          status = 'resolved',
+          resolved_deal_id = ${summary.primaryDealId},
+          resolution_method = 'merge_into_existing',
+          resolved_by = ${resolvedBy ?? null},
+          resolved_at = now()
+        WHERE id = ${id}
+      `
+      return res.json({ ok: true, action, summary })
+    }
+
+    if (action === 'ignore') {
+      await sql`
+        UPDATE deal_identity_ambiguities
+        SET
+          status = 'ignored',
+          resolution_method = 'ignore',
+          resolved_by = ${resolvedBy ?? null},
+          resolved_at = now()
+        WHERE id = ${id}
+      `
+      return res.json({ ok: true, action })
+    }
+
+    return res.status(400).json({ error: 'Unsupported action' })
+  } catch (err) {
+    if (err instanceof DealMergeError) {
+      return res.status(err.status).json({ error: err.message })
+    }
+    console.error('Error resolving deal ambiguity', err)
+    return res.status(500).json({ error: 'Failed to resolve ambiguity' })
   }
 })
 
