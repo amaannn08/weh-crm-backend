@@ -6,7 +6,8 @@ import { getDefaultDocsDir, listDocxFiles, readDocxFile } from './docxReader.js'
 import {
   isCompanyNameMissing,
   normalizeCompanyName,
-  pickBestNonWehDomainFromTranscript
+  pickBestNonWehDomainFromTranscript,
+  resolveCompanyNameFallback
 } from './companyIdentity.js'
 
 async function findExistingMeeting(fileName) {
@@ -106,6 +107,10 @@ export async function ingestDocs({ limit, dryRun } = {}) {
 
       const extractedCompany = extraction.company || ''
       const companyMissing = isCompanyNameMissing(extractedCompany)
+      const resolvedCompanyName = await resolveCompanyNameFallback({
+        company: extraction.company,
+        founderName: extraction.founder_name
+      })
       const companyDomain = pickBestNonWehDomainFromTranscript(transcript)
 
       let meetingId = existingMeeting?.id
@@ -167,7 +172,7 @@ export async function ingestDocs({ limit, dryRun } = {}) {
             source_file_name
           )
           VALUES (
-            ${extraction.company || 'Unknown company'},
+            ${resolvedCompanyName},
             ${companyDomain},
             ${meetingDate},
             ${extraction.poc || null},

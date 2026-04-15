@@ -37,6 +37,7 @@ export async function initSchema() {
   const client = await pool.connect()
   try {
     await client.query('CREATE EXTENSION IF NOT EXISTS vector')
+    await client.query('CREATE SEQUENCE IF NOT EXISTS unknown_company_seq START 1')
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS meetings (
@@ -51,6 +52,27 @@ export async function initSchema() {
     await client.query('ALTER TABLE meetings ADD COLUMN IF NOT EXISTS drive_file_id TEXT')
     await client.query('ALTER TABLE meetings ADD COLUMN IF NOT EXISTS source_file_name TEXT')
     await client.query('ALTER TABLE meetings ADD COLUMN IF NOT EXISTS company TEXT')
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS drive_transcript_ingestion_status (
+        drive_file_id TEXT PRIMARY KEY,
+        source_file_name TEXT,
+        company_name TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'processing', 'success', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_attempt_at TIMESTAMPTZ,
+        ingested_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
+    await client.query(
+      'CREATE INDEX IF NOT EXISTS idx_drive_ingestion_status_status ON drive_transcript_ingestion_status(status)'
+    )
+    await client.query(
+      'CREATE INDEX IF NOT EXISTS idx_drive_ingestion_status_updated_at ON drive_transcript_ingestion_status(updated_at DESC)'
+    )
 
     // CRM meeting metadata per deal (1:1 with deals)
     await client.query(`
@@ -412,6 +434,16 @@ export async function initSchema() {
       await client.query(`
         CREATE TRIGGER trg_segments_updated_at
         BEFORE UPDATE ON newsletter_segments
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+      `)
+    } catch (err) {
+      if (err?.code !== '42710') throw err
+    }
+    await client.query('DROP TRIGGER IF EXISTS trg_drive_ingestion_status_updated_at ON drive_transcript_ingestion_status')
+    try {
+      await client.query(`
+        CREATE TRIGGER trg_drive_ingestion_status_updated_at
+        BEFORE UPDATE ON drive_transcript_ingestion_status
         FOR EACH ROW EXECUTE FUNCTION update_updated_at()
       `)
     } catch (err) {

@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import { sql } from '../db/neon.js'
 
 function getWehDomains() {
   const raw = process.env.WEH_DOMAINS
@@ -51,5 +52,31 @@ export function normalizeCompanyName(company) {
   const trimmed = company.trim()
   if (!trimmed) return null
   return trimmed.toLowerCase()
+}
+
+function sanitizeFounderName(founderName) {
+  if (!founderName || typeof founderName !== 'string') return null
+  const cleaned = founderName
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/[^a-zA-Z0-9 ]/g, '')
+    .trim()
+  if (!cleaned) return null
+  return cleaned.replace(/\s+/g, '_')
+}
+
+async function getNextUnknownCompanyName() {
+  const rows = await sql`SELECT nextval('unknown_company_seq') AS seq`
+  const seq = rows[0]?.seq
+  return `Unknown Company ${seq}`
+}
+
+export async function resolveCompanyNameFallback({ company, founderName }) {
+  if (!isCompanyNameMissing(company)) return company.trim()
+
+  const sanitizedFounderName = sanitizeFounderName(founderName)
+  if (sanitizedFounderName) return `${sanitizedFounderName}_Stealth`
+
+  return getNextUnknownCompanyName()
 }
 

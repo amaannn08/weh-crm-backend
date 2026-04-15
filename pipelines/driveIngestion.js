@@ -9,7 +9,8 @@ import { scoreAndSaveFounder, mergeScoresForCompanyIdentity } from '../services/
 import {
   isCompanyNameMissing,
   normalizeCompanyName,
-  pickBestNonWehDomainFromTranscript
+  pickBestNonWehDomainFromTranscript,
+  resolveCompanyNameFallback
 } from '../services/companyIdentity.js'
 
 const GOOGLE_DOCS_MIME = 'application/vnd.google-apps.document'
@@ -68,12 +69,19 @@ function getDriveClient() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function listFilesInFolder(drive, folderId) {
-  const { data } = await drive.files.list({
-    q: `'${folderId}' in parents and trashed = false`,
-    fields: 'files(id, name, mimeType)',
-    pageSize: 200
-  })
-  return data.files || []
+  const allFiles = []
+  let nextPageToken = null
+  do {
+    const { data } = await drive.files.list({
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType)',
+      pageSize: 200,
+      pageToken: nextPageToken || undefined
+    })
+    allFiles.push(...(data.files || []))
+    nextPageToken = data.nextPageToken || null
+  } while (nextPageToken)
+  return allFiles
 }
 
 function streamToBuffer(stream) {
@@ -104,9 +112,99 @@ async function getFileText(drive, fileId, mimeType) {
 // DB helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function isAlreadyIngested(driveFileId) {
-  const rows = await sql`SELECT 1 FROM meetings WHERE drive_file_id = ${driveFileId} LIMIT 1`
-  return rows.length > 0
+function toErrorMessage(error) {
+  if (!error) return 'Unknown ingestion error'
+  if (typeof error === 'string') return error
+  return error.message || String(error)
+}
+
+async function upsertDiscoveredFile(file) {
+  const existingTrackingRows = await sql`
+    SELECT status
+    FROM drive_transcript_ingestion_status
+    WHERE drive_file_id = ${file.id}
+    LIMIT 1
+  `
+
+  if (existingTrackingRows.length > 0) {
+    await sql`
+      UPDATE drive_transcript_ingestion_status
+      SET source_file_name = ${file.name ?? null}
+      WHERE drive_file_id = ${file.id}
+    `
+    return
+  }
+
+  const existingMeetingRows = await sql`
+    SELECT ingested_at
+    FROM meetings
+    WHERE drive_file_id = ${file.id}
+    LIMIT 1
+  `
+  const existingMeeting = existingMeetingRows[0] ?? null
+  const bootstrapStatus = existingMeeting ? 'success' : 'pending'
+
+  await sql`
+    INSERT INTO drive_transcript_ingestion_status (
+      drive_file_id,
+      source_file_name,
+      status,
+      ingested_at
+    )
+    VALUES (
+      ${file.id},
+      ${file.name ?? null},
+      ${bootstrapStatus},
+      ${existingMeeting?.ingested_at ?? null}
+    )
+  `
+}
+
+async function getTrackingStatus(driveFileId) {
+  const rows = await sql`
+    SELECT status
+    FROM drive_transcript_ingestion_status
+    WHERE drive_file_id = ${driveFileId}
+    LIMIT 1
+  `
+  return rows[0]?.status || 'pending'
+}
+
+async function markProcessing(file) {
+  await sql`
+    UPDATE drive_transcript_ingestion_status
+    SET
+      status = ${'processing'},
+      source_file_name = ${file.name ?? null},
+      attempt_count = attempt_count + 1,
+      last_attempt_at = NOW(),
+      last_error = NULL
+    WHERE drive_file_id = ${file.id}
+  `
+}
+
+async function markFailed(file, errorMessage) {
+  await sql`
+    UPDATE drive_transcript_ingestion_status
+    SET
+      status = ${'failed'},
+      source_file_name = ${file.name ?? null},
+      last_error = ${errorMessage}
+    WHERE drive_file_id = ${file.id}
+  `
+}
+
+async function markSuccess(file, companyName) {
+  await sql`
+    UPDATE drive_transcript_ingestion_status
+    SET
+      status = ${'success'},
+      source_file_name = ${file.name ?? null},
+      company_name = ${companyName || null},
+      ingested_at = NOW(),
+      last_error = NULL
+    WHERE drive_file_id = ${file.id}
+  `
 }
 
 async function findDealBySourceFile(fileName) {
@@ -147,26 +245,33 @@ async function ingestFile(drive, file) {
   try {
     text = await getFileText(drive, file.id, file.mimeType || '')
   } catch (e) {
-    console.warn(`${label}: could not fetch text — ${e.message}`)
-    return 'error'
+    const errorMessage = `could not fetch text — ${toErrorMessage(e)}`
+    console.warn(`${label}: ${errorMessage}`)
+    return { status: 'error', error: errorMessage }
   }
 
   const transcript = text?.trim()
   if (!transcript) {
-    console.warn(`${label}: empty content, skipping`)
-    return 'error'
+    const errorMessage = 'empty content, skipping'
+    console.warn(`${label}: ${errorMessage}`)
+    return { status: 'error', error: errorMessage }
   }
 
   let extraction
   try {
     extraction = await extractDealFromTranscript({ transcript })
   } catch (e) {
-    console.warn(`${label}: deal extraction failed — ${e.message}`)
-    return 'error'
+    const errorMessage = `deal extraction failed — ${toErrorMessage(e)}`
+    console.warn(`${label}: ${errorMessage}`)
+    return { status: 'error', error: errorMessage }
   }
 
   const extractedCompany = extraction.company || ''
   const companyMissing = isCompanyNameMissing(extractedCompany)
+  const resolvedCompanyName = await resolveCompanyNameFallback({
+    company: extraction.company,
+    founderName: extraction.founder_name
+  })
   const companyDomain = pickBestNonWehDomainFromTranscript(transcript)
   const meetingDate = extraction.meeting_date || null
 
@@ -209,7 +314,7 @@ async function ingestFile(drive, file) {
         watch_reasons, action_required, source_file_name
       )
       VALUES (
-        ${extraction.company || 'Unknown company'},
+        ${resolvedCompanyName},
         ${companyDomain},
         ${meetingDate},
         ${extraction.poc || null},
@@ -263,7 +368,10 @@ async function ingestFile(drive, file) {
   }
 
   console.log(`${label}: fully ingested → deal ${dealId}`)
-  return 'processed'
+  return {
+    status: 'processed',
+    companyName: companyMissing ? null : (extractedCompany || null)
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -284,16 +392,28 @@ export async function runDriveIngest() {
   let errors = 0
 
   for (const file of files) {
-    if (await isAlreadyIngested(file.id)) {
+    await upsertDiscoveredFile(file)
+
+    const trackingStatus = await getTrackingStatus(file.id)
+    const shouldProcess = trackingStatus === 'pending' || trackingStatus === 'failed'
+    if (!shouldProcess) {
       skipped++
       continue
     }
+
     try {
+      await markProcessing(file)
       const result = await ingestFile(drive, file)
-      if (result === 'processed') processed++
-      else errors++
+      if (result.status === 'processed') {
+        await markSuccess(file, result.companyName)
+        processed++
+      } else {
+        await markFailed(file, result.error)
+        errors++
+      }
     } catch (e) {
       console.error(`[driveIngest] Unexpected error for ${file.name}:`, e)
+      await markFailed(file, toErrorMessage(e))
       errors++
     }
   }

@@ -19,7 +19,8 @@ import { embed } from '../services/embeddings.js'
 import {
   isCompanyNameMissing,
   normalizeCompanyName,
-  pickBestNonWehDomainFromTranscript
+  pickBestNonWehDomainFromTranscript,
+  resolveCompanyNameFallback
 } from '../services/companyIdentity.js'
 
 const DEAL_PATCH_FIELDS = [
@@ -258,6 +259,10 @@ router.post(
       const companyDomain = pickBestNonWehDomainFromTranscript(transcript)
       const extractedCompany = extraction.company || ''
       const companyMissing = isCompanyNameMissing(extractedCompany)
+      const resolvedCompanyName = await resolveCompanyNameFallback({
+        company: extraction.company,
+        founderName: extraction.founder_name
+      })
       const meetingDate = extraction.meeting_date || inferDateFromFilename(file.originalname) || null
       const vectorStr = formatVector(embedding)
 
@@ -361,7 +366,7 @@ router.post(
           exciting_reason, risks, conviction_score, pass_reasons,
           watch_reasons, action_required, source_file_name
         ) VALUES (
-          ${extraction.company || 'Unknown company'},
+          ${resolvedCompanyName},
           ${companyDomain},
           ${meetingDate},
           ${extraction.poc || null},
