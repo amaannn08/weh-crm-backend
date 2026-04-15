@@ -181,6 +181,9 @@ export async function initSchema() {
     await client.query(
       'ALTER TABLE deals ADD COLUMN IF NOT EXISTS dd_recommendation TEXT'
     )
+    await client.query(
+      'ALTER TABLE deals ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES companies(id) ON DELETE SET NULL'
+    )
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS founder_scores (
@@ -313,6 +316,10 @@ export async function initSchema() {
         id            SERIAL PRIMARY KEY,
         slug          TEXT UNIQUE NOT NULL,
         name          TEXT NOT NULL,
+        canonical_name TEXT,
+        aliases       TEXT[] DEFAULT '{}',
+        founder_name  TEXT,
+        source        TEXT,
         fund          TEXT NOT NULL CHECK (fund IN ('fund1','fund2','fund3')),
         sector        TEXT,
         stage         TEXT,
@@ -324,6 +331,10 @@ export async function initSchema() {
         updated_at    TIMESTAMPTZ DEFAULT NOW()
       )
     `)
+    await client.query('ALTER TABLE companies ADD COLUMN IF NOT EXISTS canonical_name TEXT')
+    await client.query('ALTER TABLE companies ADD COLUMN IF NOT EXISTS aliases TEXT[] DEFAULT \'{}\'')
+    await client.query('ALTER TABLE companies ADD COLUMN IF NOT EXISTS founder_name TEXT')
+    await client.query('ALTER TABLE companies ADD COLUMN IF NOT EXISTS source TEXT')
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS rss_sources (

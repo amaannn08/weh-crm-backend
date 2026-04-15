@@ -13,6 +13,7 @@ import {
   evaluateDealIdentity,
   createDealIdentityAmbiguity
 } from './dealIdentityResolution.js'
+import { resolveCompanyEntity } from './companyEntityResolution.js'
 
 async function findExistingMeeting(fileName) {
   const rows = await sql`
@@ -87,12 +88,40 @@ export async function ingestDocs({ limit, dryRun } = {}) {
       }
 
       const extractedCompany = extraction.company || ''
-      const companyMissing = isCompanyNameMissing(extractedCompany)
-      const resolvedCompanyName = await resolveCompanyNameFallback({
-        company: extraction.company,
-        founderName: extraction.founder_name
-      })
       const companyDomain = pickBestNonWehDomainFromTranscript(transcript)
+      const companyMissing = isCompanyNameMissing(extractedCompany)
+
+      // 1) Resolve/Create Company Record
+      const entityDecision = await resolveCompanyEntity(extractedCompany, extraction.founder_name)
+      let finalCompanyId = entityDecision.company_id
+
+      if (entityDecision.is_new || finalCompanyId <= 0) {
+        const fallbackName = entityDecision.canonical_name || extractedCompany || 'unknown'
+        const slugBase = fallbackName.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+        const randomHex = Math.floor(Math.random() * 1000000).toString(16)
+        
+        try {
+          const newCompRows = await sql`
+            INSERT INTO companies (slug, name, canonical_name, founder_name, source, fund, status)
+            VALUES (
+              ${slugBase + '-' + randomHex},
+              ${entityDecision.extracted_raw_name || fallbackName},
+              ${entityDecision.canonical_name},
+              ${extraction.founder_name || null},
+              'docs',
+              'fund3',
+              'active'
+            )
+            RETURNING id
+          `
+          finalCompanyId = newCompRows[0].id
+        } catch (err) {
+          console.error('Failed to insert new company:', err)
+          finalCompanyId = null
+        }
+      }
+
+      const resolvedCompanyName = entityDecision.canonical_name || extractedCompany
 
       let meetingId = existingMeeting?.id
       if (!meetingId) {
@@ -133,6 +162,7 @@ export async function ingestDocs({ limit, dryRun } = {}) {
         const dealRows = await sql`
           INSERT INTO deals (
             company,
+            company_id,
             company_domain,
             date,
             poc,
@@ -153,6 +183,7 @@ export async function ingestDocs({ limit, dryRun } = {}) {
           )
           VALUES (
             ${resolvedCompanyName},
+            ${finalCompanyId || null},
             ${companyDomain},
             ${meetingDate},
             ${extraction.poc || null},
@@ -175,7 +206,7 @@ export async function ingestDocs({ limit, dryRun } = {}) {
         `
         dealId = dealRows[0].id
 
-        if (identityDecision?.decision === 'ambiguous') {
+        if (identityDecision?.decision === 'ambiguous' || entityDecision.flagged_for_review) {
           await createDealIdentityAmbiguity({
             sourceType: 'docs',
             sourceFileId: file.name,
@@ -183,11 +214,14 @@ export async function ingestDocs({ limit, dryRun } = {}) {
             extractedCompany: extraction.company || null,
             normalizedCompany: normalizeCompanyName(extraction.company),
             extractedDomain: companyDomain,
-            candidateDealIds: identityDecision.candidateDeals.map((deal) => deal.id),
+            candidateDealIds: identityDecision?.candidateDeals?.map((deal) => deal.id) || [],
             pendingDealId: dealId,
             payload: {
-              reason: identityDecision.reason,
-              founder_name: extraction.founder_name || null
+              reason: identityDecision?.reason || entityDecision.reason,
+              founder_name: extraction.founder_name || null,
+              confidence: entityDecision.confidence,
+              fallback_used: entityDecision.fallback_used,
+              proposed_company_id: finalCompanyId
             }
           })
         }
