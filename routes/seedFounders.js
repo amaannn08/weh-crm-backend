@@ -1,14 +1,10 @@
 import express from 'express'
-import Exa from 'exa-js'
 import { sql } from '../db/neon.js'
 
 const router = express.Router()
 
-function getExa() {
-  const key = process.env.EXA_API_KEY
-  if (!key) throw new Error('EXA_API_KEY not configured')
-  return new Exa(key)
-}
+const EXA_API_KEY = process.env.EXA_API_KEY
+const WEBSETS_API_URL = 'https://api.exa.ai/websets/v0/websets'
 
 async function ensureSeedFoundersTable() {
   await sql`
@@ -72,48 +68,89 @@ function computeIcpScore({ title = '', stage = '', summary = '', background = ''
 }
 
 function buildQuery(params) {
-  const parts = ['Founder or Co-Founder']
-  if (params.sectors?.length) parts.push(`in ${params.sectors.join(' or ')}`)
-  if (params.stage) parts.push(`at ${params.stage} stage`)
-  if (params.location) parts.push(`based in ${params.location}`)
-  if (params.year) parts.push(`company founded in ${params.year}`)
-  if (params.backgrounds?.length) parts.push(`from ${params.backgrounds.join(' or ')}`)
-  return parts.join(', ')
+  const parts = ['Founder or Co-Founder of a']
+  if (params.stage) parts.push(params.stage)
+  if (params.sectors?.length) parts.push(params.sectors.join(' or '))
+  parts.push('startup')
+  if (params.location && params.location !== 'India' && params.location !== 'All India') parts.push('in ' + params.location)
+  if (params.year) parts.push('founded in ' + params.year)
+  if (params.backgrounds?.length) {
+    parts.push('with background from ' + params.backgrounds.join(' or '))
+  }
+  return parts.join(' ')
 }
 
-function parseLinkedInTitle(raw = '') {
-  let cleaned = raw.replace(/\s*[-|]\s*LinkedIn\s*$/i, '').trim()
-  const parts = cleaned.split(/\s*[-|–—,]\s*/).filter(p => p.length > 0)
-  let name = parts[0] || ''
-  let title = ''
-  let companyName = ''
+function buildCriteria(params) {
+  const criteria = []
+  criteria.push({ description: 'Currently a Founder or Co-Founder (not employee or manager)', successRate: 95 })
 
-  name = name.replace(/^(Mr\.?|Mrs\.?|Ms\.?|Dr\.?)\s+/i, '').trim()
-
-  const nameAtMatch = name.match(/^(.*?)\s+(?:at|@)\s+(.*)$/i)
-  if (nameAtMatch) { name = nameAtMatch[1].trim(); companyName = nameAtMatch[2].trim() }
-
-  const titleKeywords = ['founder', 'ceo', 'cto', 'director', 'manager', 'head', 'lead', 'vp', 'president', 'partner']
-  let titleIdx = -1
-  for (let i = 1; i < parts.length; i++) {
-    if (titleKeywords.some(kw => parts[i].toLowerCase().includes(kw))) { titleIdx = i; break }
+  if (params.location && params.location !== 'India' && params.location !== 'All India') {
+    criteria.push({ description: `Based in ${params.location}`, successRate: 90 })
+  } else {
+    criteria.push({ description: 'Based in India (any city)', successRate: 95 })
   }
 
-  if (titleIdx !== -1) {
-    title = parts[titleIdx].trim()
-    companyName = parts.slice(titleIdx + 1).join(' | ').trim()
-  } else if (parts.length > 1) {
-    title = parts[1].trim()
-    companyName = parts.slice(2).join(' | ').trim()
+  if (params.year && params.stage) {
+    criteria.push({ description: `Company is ${params.stage} and founded in ${params.year}`, successRate: 88 })
+  } else if (params.year) {
+    criteria.push({ description: `Company founded in ${params.year}`, successRate: 90 })
+  } else if (params.stage) {
+    criteria.push({ description: `Company is ${params.stage} (not Series A or later)`, successRate: 85 })
   }
 
-  const titleAtMatch = title.match(/^(.*?)\s+(?:at|@)\s+(.*)$/i)
-  if (titleAtMatch) {
-    title = titleAtMatch[1].trim()
-    companyName = companyName ? titleAtMatch[2].trim() + ' | ' + companyName : titleAtMatch[2].trim()
+  if (params.backgrounds?.length && criteria.length < 5) {
+    criteria.push({ description: `Alumni or ex-employee of: ${params.backgrounds.join(', ')}`, successRate: 85 })
   }
 
-  return { name, title, companyName }
+  if (params.sectors?.length && criteria.length < 5) {
+    criteria.push({ description: `Building in ${params.sectors.join(' or ')} sector`, successRate: 80 })
+  }
+
+  return criteria.slice(0, 5)
+}
+
+async function createWebset(query, criteria, count) {
+  const res = await fetch(WEBSETS_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': EXA_API_KEY },
+    body: JSON.stringify({
+      title: `Sahourai Search - ${new Date().toLocaleDateString()}`,
+      search: { query, entity: { type: 'person' }, criteria, count },
+      enrichments: []
+    })
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Exa API error ${res.status}: ${text}`)
+  }
+  const data = await res.json()
+  if (!data.id) throw new Error('No Webset ID returned')
+  return data.id
+}
+
+async function pollWebset(websetId) {
+  const maxWait = 480000 // 8 min
+  const interval = 5000
+  const start = Date.now()
+
+  while (Date.now() - start < maxWait) {
+    await new Promise(r => setTimeout(r, interval))
+    const res = await fetch(`${WEBSETS_API_URL}/${websetId}`, {
+      headers: { 'x-api-key': EXA_API_KEY }
+    })
+    if (!res.ok) continue
+    const data = await res.json()
+    if (data.status === 'idle' || data.status === 'completed') break
+    if (data.status === 'canceled' || data.status === 'failed') {
+      throw new Error(`Webset ${data.status}`)
+    }
+  }
+
+  const res = await fetch(`${WEBSETS_API_URL}/${websetId}/items`, {
+    headers: { 'x-api-key': EXA_API_KEY }
+  })
+  const data = await res.json()
+  return data.data || []
 }
 
 function extractLinkedInId(url = '') {
@@ -121,30 +158,17 @@ function extractLinkedInId(url = '') {
   return match ? match[1] : null
 }
 
-function extractFromHighlights(highlights = []) {
-  const text = highlights.join(' ')
-  const cities = ['Bengaluru', 'Bangalore', 'Mumbai', 'Delhi', 'Hyderabad',
-    'Chennai', 'Pune', 'Kolkata', 'Ahmedabad', 'Gurgaon', 'Noida']
-  const found = cities.find(c => text.includes(c))
-  return { location: found || '', summary: text.slice(0, 400) }
-}
-
-function buildRowData(item, params) {
-  const url = item.url || ''
-  const { name, title, companyName } = parseLinkedInTitle(item.title || '')
-  const { location, summary } = extractFromHighlights(item.highlights || [])
-  const linkedinId = extractLinkedInId(url)
-  const stage = normalizeStage(params.stage || '')
-  const icpScore = computeIcpScore({ title, stage, summary, background: params.backgrounds?.join(' ') || '' })
-
+function extractFields(item) {
+  const props = item.properties || {}
+  const person = props.person || {}
+  const company = person.company || {}
   return {
-    name, linkedin_id: linkedinId, linkedin_url: url, title,
-    company_name: companyName,
-    sector: params.sectors?.join(', ') || '',
-    background: params.backgrounds?.join(', ') || '',
-    location: location || params.location || 'India',
-    stage, founded_year: params.year || '',
-    summary, icp_score: icpScore, status: 'New'
+    url: props.url || '',
+    name: person.name || '',
+    title: person.position || 'Founder',
+    companyName: company.name || 'Startup',
+    location: person.location || '',
+    summary: props.description || ''
   }
 }
 
@@ -175,31 +199,48 @@ async function upsertFounder(row) {
 // ─── POST /seed-founders/search ─────────────────────────────────────────────
 router.post('/search', async (req, res) => {
   try {
-    const exa = getExa()
+    if (!EXA_API_KEY) throw new Error('EXA_API_KEY not configured')
+
     await ensureSeedFoundersTable()
 
     const params = req.body
     const shouldSave = params.save !== false  // default true, pass save:false for preview
     const count = Math.min(params.count || 25, 100)
+    
     const query = buildQuery(params)
+    const criteria = buildCriteria(params)
 
-    console.log(`[seedFounders] searching: "${query}" (n=${count}, save=${shouldSave})`)
+    console.log(`[seedFounders] webset search: "${query}" (n=${count}, save=${shouldSave})`)
 
-    const searchRes = await exa.search(query, {
-      type: 'auto', num_results: count, category: 'person',
-      includeDomains: ['linkedin.com'],
-      contents: { highlights: { max_characters: 2000 } }
-    })
+    const websetId = await createWebset(query, criteria, count)
+    const items = await pollWebset(websetId)
 
-    const items = (searchRes.results || []).filter(r => /linkedin\.com\/in\//.test(r.url))
-    if (!items.length) return res.json({ success: false, message: 'No founders found. Try broader search.' })
+    if (!items.length) {
+      return res.json({ success: false, message: 'No founders found. Try broader search.' })
+    }
 
     let added = 0, duplicates = 0
     const results = []
 
     for (const item of items) {
-      const row = buildRowData(item, params)
+      const { url, name, title, companyName, location, summary } = extractFields(item)
+      const linkedinId = extractLinkedInId(url)
+      
+      const stage = normalizeStage(params.stage || '')
+      const icpScore = computeIcpScore({ title, stage, summary, background: params.backgrounds?.join(' ') || '' })
+
+      const row = {
+        name, linkedin_id: linkedinId, linkedin_url: url, title,
+        company_name: companyName,
+        sector: params.sectors?.join(', ') || '',
+        background: params.backgrounds?.join(', ') || '',
+        location: location || params.location || 'India',
+        stage, founded_year: params.year || '',
+        summary, icp_score: icpScore, status: 'New'
+      }
+      
       results.push(row)
+      
       if (shouldSave) {
         try {
           const outcome = await upsertFounder(row)
