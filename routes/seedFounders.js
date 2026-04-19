@@ -5,6 +5,12 @@ const router = express.Router()
 
 const EXA_API_KEY = process.env.EXA_API_KEY
 const WEBSETS_API_URL = 'https://api.exa.ai/websets/v0/websets'
+const SSE_HEADERS = {
+  'Content-Type': 'text/event-stream',
+  'Cache-Control': 'no-cache, no-transform',
+  Connection: 'keep-alive'
+}
+const MAX_WEBSET_WAIT_MS = 480000
 
 async function ensureSeedFoundersTable() {
   await sql`
@@ -157,29 +163,151 @@ async function createWebset(query, criteria, count) {
   return data.id
 }
 
-async function pollWebset(websetId) {
-  const maxWait = 480000 // 8 min
-  const interval = 5000
-  const start = Date.now()
+function emitSse(res, event, payload) {
+  res.write(`event: ${event}\n`)
+  res.write(`data: ${JSON.stringify(payload)}\n\n`)
+}
 
-  while (Date.now() - start < maxWait) {
-    await new Promise(r => setTimeout(r, interval))
-    const res = await fetch(`${WEBSETS_API_URL}/${websetId}`, {
-      headers: { 'x-api-key': EXA_API_KEY }
-    })
-    if (!res.ok) continue
-    const data = await res.json()
-    if (data.status === 'idle' || data.status === 'completed') break
-    if (data.status === 'canceled' || data.status === 'failed') {
-      throw new Error(`Webset ${data.status}`)
-    }
+async function getWebsetStatus(websetId) {
+  const res = await fetch(`${WEBSETS_API_URL}/${websetId}`, {
+    headers: { 'x-api-key': EXA_API_KEY }
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Failed to get webset status (${res.status}): ${text}`)
   }
+  return res.json()
+}
 
+async function getWebsetItems(websetId) {
   const res = await fetch(`${WEBSETS_API_URL}/${websetId}/items`, {
     headers: { 'x-api-key': EXA_API_KEY }
   })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Failed to get webset items (${res.status}): ${text}`)
+  }
   const data = await res.json()
   return data.data || []
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function pollIntervalForElapsed(elapsedMs) {
+  if (elapsedMs < 30_000) return 1_500
+  if (elapsedMs < 120_000) return 3_000
+  return 5_000
+}
+
+function dedupeKeyForItem(item) {
+  const props = item?.properties || {}
+  const person = props.person || {}
+  return item?.id
+    || props.url
+    || person.linkedinUrl
+    || person.linkedinProfileUrl
+    || `${person.name || ''}:${person.position || ''}:${person.location || ''}`
+}
+
+async function streamWebsetWithAdaptivePolling(websetId, params, onEvent) {
+  const start = Date.now()
+  const seenKeys = new Set()
+  const normalizedRows = []
+  let transientFailures = 0
+  let lastStatus = 'starting'
+
+  while (Date.now() - start < MAX_WEBSET_WAIT_MS) {
+    const elapsedMs = Date.now() - start
+    const intervalMs = pollIntervalForElapsed(elapsedMs)
+    await sleep(intervalMs)
+
+    let status
+    let items
+    try {
+      [status, items] = await Promise.all([
+        getWebsetStatus(websetId),
+        getWebsetItems(websetId)
+      ])
+      transientFailures = 0
+    } catch (err) {
+      transientFailures += 1
+      if (transientFailures > 1) throw err
+      onEvent('progress', {
+        source: 'adaptive-poll',
+        status: lastStatus,
+        foundCount: normalizedRows.length,
+        newCount: 0,
+        elapsedMs,
+        intervalMs,
+        message: 'Temporary fetch issue, retrying...'
+      })
+      continue
+    }
+
+    lastStatus = status.status || 'processing'
+    const newlyFound = []
+    for (const item of items) {
+      const key = dedupeKeyForItem(item)
+      if (!key || seenKeys.has(key)) continue
+      seenKeys.add(key)
+      const row = normalizeFounder(item, params)
+      normalizedRows.push(row)
+      newlyFound.push(row)
+    }
+
+    if (newlyFound.length) {
+      onEvent('item_batch', {
+        source: 'adaptive-poll',
+        websetId,
+        batchCount: newlyFound.length,
+        totalSoFar: normalizedRows.length,
+        results: newlyFound
+      })
+    }
+
+    onEvent('progress', {
+      source: 'adaptive-poll',
+      status: lastStatus,
+      foundCount: normalizedRows.length,
+      newCount: newlyFound.length,
+      elapsedMs,
+      intervalMs,
+      message: `Webset status: ${lastStatus} (${normalizedRows.length} found)`
+    })
+
+    if (lastStatus === 'idle' || lastStatus === 'completed') {
+      return normalizedRows
+    }
+    if (lastStatus === 'canceled' || lastStatus === 'failed') {
+      throw new Error(`Webset ${lastStatus}`)
+    }
+  }
+
+  throw new Error('Webset timed out before completion')
+}
+
+function normalizeFounder(item, params) {
+  const { url, name, title, companyName, location, summary } = extractFields(item)
+  const linkedinId = extractLinkedInId(url)
+  const stage = normalizeStage(params.stage || '')
+  const icpScore = computeIcpScore({
+    title,
+    stage,
+    summary,
+    background: params.backgrounds?.join(' ') || ''
+  })
+
+  return {
+    name, linkedin_id: linkedinId, linkedin_url: url, title,
+    company_name: companyName,
+    sector: params.sectors?.join(', ') || '',
+    background: params.backgrounds?.join(', ') || '',
+    location: location || params.location || 'India',
+    stage, founded_year: params.year || '',
+    summary, icp_score: icpScore, status: 'New'
+  }
 }
 
 function extractLinkedInId(url = '') {
@@ -241,35 +369,39 @@ router.post('/search', async (req, res) => {
 
     console.log(`[seedFounders] webset search: "${query}" (n=${count}, save=${shouldSave})`)
 
-    const websetId = await createWebset(query, criteria, count)
-    const items = await pollWebset(websetId)
+    res.writeHead(200, SSE_HEADERS)
+    res.flushHeaders?.()
 
-    if (!items.length) {
-      return res.json({ success: false, message: 'No founders found. Try broader search.' })
+    const websetId = await createWebset(query, criteria, count)
+    emitSse(res, 'ready', {
+      websetId,
+      message: 'Webset created. Starting adaptive live updates...'
+    })
+
+    emitSse(res, 'contract', {
+      progress: {
+        fields: ['source', 'status', 'foundCount', 'newCount', 'elapsedMs', 'intervalMs', 'message']
+      },
+      item_batch: {
+        fields: ['source', 'websetId', 'batchCount', 'totalSoFar', 'results']
+      },
+      done: {
+        fields: ['success', 'added', 'duplicates', 'total', 'results', 'message']
+      }
+    })
+
+    const results = await streamWebsetWithAdaptivePolling(websetId, params, (event, payload) => {
+      emitSse(res, event, payload)
+    })
+
+    if (!results.length) {
+      emitSse(res, 'done', { success: false, message: 'No founders found. Try broader search.' })
+      return res.end()
     }
 
     let added = 0, duplicates = 0
-    const results = []
 
-    for (const item of items) {
-      const { url, name, title, companyName, location, summary } = extractFields(item)
-      const linkedinId = extractLinkedInId(url)
-      
-      const stage = normalizeStage(params.stage || '')
-      const icpScore = computeIcpScore({ title, stage, summary, background: params.backgrounds?.join(' ') || '' })
-
-      const row = {
-        name, linkedin_id: linkedinId, linkedin_url: url, title,
-        company_name: companyName,
-        sector: params.sectors?.join(', ') || '',
-        background: params.backgrounds?.join(', ') || '',
-        location: location || params.location || 'India',
-        stage, founded_year: params.year || '',
-        summary, icp_score: icpScore, status: 'New'
-      }
-      
-      results.push(row)
-      
+    for (const row of results) {
       if (shouldSave) {
         try {
           const outcome = await upsertFounder(row)
@@ -281,18 +413,23 @@ router.post('/search', async (req, res) => {
       }
     }
 
-    return res.json({
+    emitSse(res, 'done', {
       success: true, added: shouldSave ? added : 0,
       duplicates: shouldSave ? duplicates : 0,
-      total: items.length,
+      total: results.length,
       results: results.sort((a, b) => b.icp_score - a.icp_score),
       message: shouldSave
-        ? `Found ${items.length} founders — ${added} new, ${duplicates} duplicates`
-        : `Found ${items.length} founders`
+        ? `Found ${results.length} founders — ${added} new, ${duplicates} duplicates`
+        : `Found ${results.length} founders`
     })
+    return res.end()
   } catch (err) {
     console.error('[seedFounders] search error:', err)
-    return res.status(500).json({ success: false, message: err.message })
+    if (!res.headersSent) {
+      return res.status(500).json({ success: false, message: err.message })
+    }
+    emitSse(res, 'error', { success: false, message: err.message || 'Search failed' })
+    return res.end()
   }
 })
 
