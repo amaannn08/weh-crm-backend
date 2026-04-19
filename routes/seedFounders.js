@@ -95,12 +95,21 @@ function buildQuery(params) {
 
 function buildCriteria(params) {
   const criteria = []
-  criteria.push({ description: 'Currently a Founder or Co-Founder (not employee or manager)', successRate: 95 })
+  const hasQuery = params.query && params.query.trim() !== ''
 
-  if (params.location && params.location !== 'India' && params.location !== 'All India') {
-    criteria.push({ description: `Based in ${params.location}`, successRate: 90 })
+  if (!hasQuery) {
+    // Default strict criteria for empty chatbox (finding founders)
+    criteria.push({ description: 'Currently a Founder or Co-Founder (not employee or manager)', successRate: 95 })
+    if (params.location && params.location !== 'India' && params.location !== 'All India') {
+      criteria.push({ description: `Based in ${params.location}`, successRate: 90 })
+    } else {
+      criteria.push({ description: 'Based in India (any city)', successRate: 95 })
+    }
   } else {
-    criteria.push({ description: 'Based in India (any city)', successRate: 95 })
+    // If custom chat query provided, only apply location if explicitly set
+    if (params.location && params.location !== 'India' && params.location !== 'All India') {
+      criteria.push({ description: `Based in ${params.location}`, successRate: 90 })
+    }
   }
 
   if (params.year && params.stage) {
@@ -123,12 +132,19 @@ function buildCriteria(params) {
 }
 
 async function createWebset(query, criteria, count) {
+  const searchPayload = { query, entity: { type: 'person' }, count }
+  
+  // Only attach criteria if we have them, otherwise let Exa handle the query breakdown natively
+  if (criteria && criteria.length > 0) {
+    searchPayload.criteria = criteria
+  }
+
   const res = await fetch(WEBSETS_API_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': EXA_API_KEY },
     body: JSON.stringify({
       title: `Sahourai Search - ${new Date().toLocaleDateString()}`,
-      search: { query, entity: { type: 'person' }, criteria, count },
+      search: searchPayload,
       enrichments: []
     })
   })
