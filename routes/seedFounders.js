@@ -11,6 +11,7 @@ const SSE_HEADERS = {
   Connection: 'keep-alive'
 }
 const MAX_WEBSET_WAIT_MS = 480000
+const canceledWebsets = new Set()
 
 async function ensureSeedFoundersTable() {
   await sql`
@@ -35,6 +36,31 @@ async function ensureSeedFoundersTable() {
   `
   await sql`ALTER TABLE seed_founders ADD COLUMN IF NOT EXISTS icp_score NUMERIC(5,1) DEFAULT 0`
   await sql`ALTER TABLE seed_founders ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'`
+}
+
+async function ensureSeedLpsTable() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS seed_lps (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name          TEXT,
+      linkedin_id   TEXT UNIQUE,
+      linkedin_url  TEXT,
+      title         TEXT,
+      company_name  TEXT,
+      sector        TEXT,
+      background    TEXT,
+      location      TEXT,
+      stage         TEXT,
+      founded_year  TEXT,
+      summary       TEXT,
+      icp_score     NUMERIC(5,1) DEFAULT 0,
+      status        TEXT DEFAULT 'New',
+      searched_at   TIMESTAMPTZ DEFAULT now(),
+      created_at    TIMESTAMPTZ DEFAULT now()
+    )
+  `
+  await sql`ALTER TABLE seed_lps ADD COLUMN IF NOT EXISTS icp_score NUMERIC(5,1) DEFAULT 0`
+  await sql`ALTER TABLE seed_lps ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'`
 }
 
 function normalizeStage(raw = '') {
@@ -163,6 +189,18 @@ async function createWebset(query, criteria, count) {
   return data.id
 }
 
+async function cancelWebset(websetId) {
+  const res = await fetch(`${WEBSETS_API_URL}/${websetId}/cancel`, {
+    method: 'POST',
+    headers: { 'x-api-key': EXA_API_KEY }
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`Failed to cancel webset (${res.status}): ${text}`)
+  }
+  return res.json().catch(() => ({ ok: true }))
+}
+
 function emitSse(res, event, payload) {
   res.write(`event: ${event}\n`)
   res.write(`data: ${JSON.stringify(payload)}\n\n`)
@@ -211,7 +249,7 @@ function dedupeKeyForItem(item) {
     || `${person.name || ''}:${person.position || ''}:${person.location || ''}`
 }
 
-async function streamWebsetWithAdaptivePolling(websetId, params, onEvent) {
+async function streamWebsetWithAdaptivePolling(websetId, params, onEvent, shouldCancel) {
   const start = Date.now()
   const seenKeys = new Set()
   const normalizedRows = []
@@ -219,6 +257,7 @@ async function streamWebsetWithAdaptivePolling(websetId, params, onEvent) {
   let lastStatus = 'starting'
 
   while (Date.now() - start < MAX_WEBSET_WAIT_MS) {
+    if (shouldCancel()) throw new Error('Seeding cancelled by user')
     const elapsedMs = Date.now() - start
     const intervalMs = pollIntervalForElapsed(elapsedMs)
     await sleep(intervalMs)
@@ -353,8 +392,33 @@ async function upsertFounder(row) {
   }
 }
 
+async function upsertLp(row) {
+  if (row.linkedin_id) {
+    await sql`
+      INSERT INTO seed_lps (name, linkedin_id, linkedin_url, title, company_name,
+        sector, background, location, stage, founded_year, summary, icp_score, status)
+      VALUES (${row.name}, ${row.linkedin_id}, ${row.linkedin_url}, ${row.title}, ${row.company_name},
+        ${row.sector}, ${row.background}, ${row.location}, ${row.stage}, ${row.founded_year},
+        ${row.summary}, ${row.icp_score}, 'New')
+      ON CONFLICT (linkedin_id) DO NOTHING
+    `
+    const check = await sql`SELECT id FROM seed_lps WHERE linkedin_id = ${row.linkedin_id}`
+    return check.length ? 'added' : 'duplicate'
+  }
+
+  await sql`
+    INSERT INTO seed_lps (name, linkedin_id, linkedin_url, title, company_name,
+      sector, background, location, stage, founded_year, summary, icp_score, status)
+    VALUES (${row.name}, ${null}, ${row.linkedin_url}, ${row.title}, ${row.company_name},
+      ${row.sector}, ${row.background}, ${row.location}, ${row.stage}, ${row.founded_year},
+      ${row.summary}, ${row.icp_score}, 'New')
+  `
+  return 'added'
+}
+
 // ─── POST /seed-founders/search ─────────────────────────────────────────────
 router.post('/search', async (req, res) => {
+  let activeWebsetId = null
   try {
     if (!EXA_API_KEY) throw new Error('EXA_API_KEY not configured')
 
@@ -373,6 +437,8 @@ router.post('/search', async (req, res) => {
     res.flushHeaders?.()
 
     const websetId = await createWebset(query, criteria, count)
+    activeWebsetId = websetId
+    canceledWebsets.delete(websetId)
     emitSse(res, 'ready', {
       websetId,
       message: 'Webset created. Starting adaptive live updates...'
@@ -390,9 +456,14 @@ router.post('/search', async (req, res) => {
       }
     })
 
-    const results = await streamWebsetWithAdaptivePolling(websetId, params, (event, payload) => {
-      emitSse(res, event, payload)
-    })
+    const results = await streamWebsetWithAdaptivePolling(
+      websetId,
+      params,
+      (event, payload) => {
+        emitSse(res, event, payload)
+      },
+      () => canceledWebsets.has(websetId)
+    )
 
     if (!results.length) {
       emitSse(res, 'done', { success: false, message: 'No founders found. Try broader search.' })
@@ -422,12 +493,19 @@ router.post('/search', async (req, res) => {
         ? `Found ${results.length} founders — ${added} new, ${duplicates} duplicates`
         : `Found ${results.length} founders`
     })
+    canceledWebsets.delete(websetId)
     return res.end()
   } catch (err) {
     console.error('[seedFounders] search error:', err)
     if (!res.headersSent) {
       return res.status(500).json({ success: false, message: err.message })
     }
+    if (err.message === 'Seeding cancelled by user') {
+      if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
+      emitSse(res, 'done', { success: false, cancelled: true, message: 'Seeding stopped by user' })
+      return res.end()
+    }
+    if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
     emitSse(res, 'error', { success: false, message: err.message || 'Search failed' })
     return res.end()
   }
@@ -453,6 +531,68 @@ router.post('/save-batch', async (req, res) => {
     return res.json({ success: true, added, duplicates })
   } catch (err) {
     console.error('[seedFounders] save-batch error:', err)
+    return res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+router.post('/save-lps-batch', async (req, res) => {
+  try {
+    await ensureSeedLpsTable()
+    const { lps = [] } = req.body
+    let added = 0, duplicates = 0
+
+    for (const row of lps) {
+      try {
+        const outcome = await upsertLp(row)
+        if (outcome === 'added') added++; else duplicates++
+      } catch (e) {
+        if (e.code === '23505') duplicates++
+        else console.error('[seedFounders] lp batch insert error:', e.message)
+      }
+    }
+
+    return res.json({ success: true, added, duplicates })
+  } catch (err) {
+    console.error('[seedFounders] save-lps-batch error:', err)
+    return res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+router.get('/lps', async (req, res) => {
+  try {
+    await ensureSeedLpsTable()
+    const { search, limit = 200, offset = 0 } = req.query
+    const q = search ? `%${search}%` : null
+
+    let rows
+    if (q) {
+      rows = await sql`SELECT * FROM seed_lps WHERE name ILIKE ${q} OR company_name ILIKE ${q} OR title ILIKE ${q} ORDER BY icp_score DESC, created_at DESC LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
+    } else {
+      rows = await sql`SELECT * FROM seed_lps ORDER BY icp_score DESC, created_at DESC LIMIT ${Number(limit)} OFFSET ${Number(offset)}`
+    }
+
+    return res.json({ lps: rows })
+  } catch (err) {
+    console.error('[seedFounders] list lps error:', err)
+    return res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/search/cancel', async (req, res) => {
+  try {
+    if (!EXA_API_KEY) throw new Error('EXA_API_KEY not configured')
+    const { websetId } = req.body || {}
+    if (!websetId) return res.status(400).json({ success: false, message: 'websetId is required' })
+
+    canceledWebsets.add(websetId)
+    let upstream = null
+    try {
+      upstream = await cancelWebset(websetId)
+    } catch (err) {
+      upstream = { ok: false, message: err.message }
+    }
+    return res.json({ success: true, cancelled: true, websetId, upstream })
+  } catch (err) {
     return res.status(500).json({ success: false, message: err.message })
   }
 })
