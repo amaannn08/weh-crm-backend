@@ -68,15 +68,28 @@ function computeIcpScore({ title = '', stage = '', summary = '', background = ''
 }
 
 function buildQuery(params) {
-  const parts = ['Founder or Co-Founder of a']
+  const parts = []
+  const hasQuery = params.query && params.query.trim() !== ''
+
+  if (hasQuery) {
+    parts.push(params.query.trim())
+  } else {
+    parts.push('Founder or Co-Founder of a')
+  }
+
   if (params.stage) parts.push(params.stage)
   if (params.sectors?.length) parts.push(params.sectors.join(' or '))
-  parts.push('startup')
+  
+  if (!hasQuery) {
+    parts.push('startup')
+  }
+
   if (params.location && params.location !== 'India' && params.location !== 'All India') parts.push('in ' + params.location)
   if (params.year) parts.push('founded in ' + params.year)
   if (params.backgrounds?.length) {
     parts.push('with background from ' + params.backgrounds.join(' or '))
   }
+  
   return parts.join(' ')
 }
 
