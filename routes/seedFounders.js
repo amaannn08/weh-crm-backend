@@ -63,6 +63,60 @@ async function ensureSeedLpsTable() {
   await sql`ALTER TABLE seed_lps ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'`
 }
 
+async function ensureSeedSearchesTable() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS seed_searches (
+      id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      webset_id      TEXT,
+      query_text     TEXT,
+      params_json    JSONB,
+      status         TEXT DEFAULT 'running',
+      results_count  INTEGER DEFAULT 0,
+      error_message  TEXT,
+      created_at     TIMESTAMPTZ DEFAULT now(),
+      completed_at   TIMESTAMPTZ
+    )
+  `
+  await sql`ALTER TABLE seed_searches ADD COLUMN IF NOT EXISTS webset_id TEXT`
+  await sql`ALTER TABLE seed_searches ADD COLUMN IF NOT EXISTS query_text TEXT`
+  await sql`ALTER TABLE seed_searches ADD COLUMN IF NOT EXISTS params_json JSONB`
+  await sql`ALTER TABLE seed_searches ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'running'`
+  await sql`ALTER TABLE seed_searches ADD COLUMN IF NOT EXISTS results_count INTEGER DEFAULT 0`
+  await sql`ALTER TABLE seed_searches ADD COLUMN IF NOT EXISTS error_message TEXT`
+  await sql`ALTER TABLE seed_searches ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`
+}
+
+async function createSearchLog({ query, params }) {
+  const rows = await sql`
+    INSERT INTO seed_searches (query_text, params_json, status)
+    VALUES (${query}, ${JSON.stringify(params || {})}::jsonb, 'running')
+    RETURNING id
+  `
+  return rows[0]?.id
+}
+
+async function updateSearchLog(id, updates = {}) {
+  if (!id) return
+  const {
+    websetId = null,
+    status = null,
+    resultsCount = null,
+    errorMessage = null,
+    completed = false
+  } = updates
+
+  await sql`
+    UPDATE seed_searches
+    SET
+      webset_id = COALESCE(${websetId}, webset_id),
+      status = COALESCE(${status}, status),
+      results_count = COALESCE(${resultsCount}, results_count),
+      error_message = COALESCE(${errorMessage}, error_message),
+      completed_at = CASE WHEN ${completed} THEN now() ELSE completed_at END
+    WHERE id = ${id}
+  `
+}
+
 function normalizeStage(raw = '') {
   const r = raw.toLowerCase()
   if (r.includes('pre-seed') || r.includes('preseed')) return 'Pre-Seed'
@@ -419,10 +473,12 @@ async function upsertLp(row) {
 // ─── POST /seed-founders/search ─────────────────────────────────────────────
 router.post('/search', async (req, res) => {
   let activeWebsetId = null
+  let searchLogId = null
   try {
     if (!EXA_API_KEY) throw new Error('EXA_API_KEY not configured')
 
     await ensureSeedFoundersTable()
+    await ensureSeedSearchesTable()
 
     const params = req.body
     const shouldSave = params.save !== false  // default true, pass save:false for preview
@@ -430,6 +486,7 @@ router.post('/search', async (req, res) => {
     
     const query = buildQuery(params)
     const criteria = buildCriteria(params)
+    searchLogId = await createSearchLog({ query, params })
 
     console.log(`[seedFounders] webset search: "${query}" (n=${count}, save=${shouldSave})`)
 
@@ -438,6 +495,7 @@ router.post('/search', async (req, res) => {
 
     const websetId = await createWebset(query, criteria, count)
     activeWebsetId = websetId
+    await updateSearchLog(searchLogId, { websetId })
     canceledWebsets.delete(websetId)
     emitSse(res, 'ready', {
       websetId,
@@ -466,6 +524,7 @@ router.post('/search', async (req, res) => {
     )
 
     if (!results.length) {
+      await updateSearchLog(searchLogId, { status: 'completed', resultsCount: 0, completed: true })
       emitSse(res, 'done', { success: false, message: 'No founders found. Try broader search.' })
       return res.end()
     }
@@ -493,6 +552,7 @@ router.post('/search', async (req, res) => {
         ? `Found ${results.length} founders — ${added} new, ${duplicates} duplicates`
         : `Found ${results.length} founders`
     })
+    await updateSearchLog(searchLogId, { status: 'completed', resultsCount: results.length, completed: true })
     canceledWebsets.delete(websetId)
     return res.end()
   } catch (err) {
@@ -502,10 +562,12 @@ router.post('/search', async (req, res) => {
     }
     if (err.message === 'Seeding cancelled by user') {
       if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
+      await updateSearchLog(searchLogId, { status: 'cancelled', completed: true })
       emitSse(res, 'done', { success: false, cancelled: true, message: 'Seeding stopped by user' })
       return res.end()
     }
     if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
+    await updateSearchLog(searchLogId, { status: 'failed', errorMessage: err.message || 'Search failed', completed: true })
     emitSse(res, 'error', { success: false, message: err.message || 'Search failed' })
     return res.end()
   }
@@ -574,6 +636,23 @@ router.get('/lps', async (req, res) => {
     return res.json({ lps: rows })
   } catch (err) {
     console.error('[seedFounders] list lps error:', err)
+    return res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/recent-searches', async (req, res) => {
+  try {
+    await ensureSeedSearchesTable()
+    const { limit = 50, offset = 0 } = req.query
+    const rows = await sql`
+      SELECT id, webset_id, query_text, status, results_count, error_message, created_at, completed_at
+      FROM seed_searches
+      ORDER BY created_at DESC
+      LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+    `
+    return res.json({ searches: rows })
+  } catch (err) {
+    console.error('[seedFounders] recent searches error:', err)
     return res.status(500).json({ error: err.message })
   }
 })
@@ -648,6 +727,16 @@ router.patch('/:id/status', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     await sql`DELETE FROM seed_founders WHERE id = ${req.params.id}`
+    return res.json({ ok: true })
+  } catch (err) {
+    return res.status(500).json({ error: err.message })
+  }
+})
+
+router.delete('/lps/:id', async (req, res) => {
+  try {
+    await ensureSeedLpsTable()
+    await sql`DELETE FROM seed_lps WHERE id = ${req.params.id}`
     return res.json({ ok: true })
   } catch (err) {
     return res.status(500).json({ error: err.message })
