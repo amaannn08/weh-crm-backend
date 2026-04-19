@@ -32,6 +32,7 @@
     "axios": "^1.13.6",
     "cheerio": "^1.2.0",
     "dotenv": "^16.4.5",
+    "exa-js": "^2.11.0",
     "express": "^4.21.0",
     "googleapis": "^144.0.0",
     "jsonwebtoken": "^9.0.2",

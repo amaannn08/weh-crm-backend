@@ -7,6 +7,7 @@ import assistantRoutes from './routes/assistant.js'
 import conversationRoutes from './routes/conversations.js'
 import dealsRoutes from './routes/deals.js'
 import meetingsRoutes from './routes/meetings.js'
+import seedFoundersRoutes from './routes/seedFounders.js'
 import portfolioNewsRoutes from './modules/portfolioNews/routes/news.js'
 import portfolioCompaniesRoutes from './modules/portfolioNews/routes/companies.js'
 import portfolioNewslettersRoutes from './modules/portfolioNews/routes/newsletters.js'
@@ -47,6 +48,7 @@ app.use('/assistant', authMiddleware, assistantRoutes)
 app.use('/conversations', authMiddleware, conversationRoutes)
 app.use('/deals', authMiddleware, dealsRoutes)
 app.use('/meetings', authMiddleware, meetingsRoutes)
+app.use('/seed-founders', authMiddleware, seedFoundersRoutes)
 app.use('/news', portfolioNewsRoutes)
 app.use('/companies', portfolioCompaniesRoutes)
 app.use('/newsletters', portfolioNewslettersRoutes)
