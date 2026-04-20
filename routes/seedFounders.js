@@ -13,6 +13,42 @@ const SSE_HEADERS = {
 const MAX_WEBSET_WAIT_MS = 480000
 const canceledWebsets = new Set()
 
+function sanitizeErrorMessage(input) {
+  const raw = (input instanceof Error ? input.message : String(input || '')) || ''
+  if (!raw) return 'Search failed. Please try again.'
+
+  if (raw === 'Seeding cancelled by user') return raw
+  if (raw === 'Search cancelled') return raw
+
+  const lower = raw.toLowerCase()
+
+  if (lower.includes('credit') && (lower.includes('enough') || lower.includes('finish') || lower.includes('insufficient') || lower.includes('more credits'))) {
+    return 'Search credits finished. Please try again later.'
+  }
+  if (lower.includes('rate limit') || lower.includes(' 429')) {
+    return 'Too many requests — please wait a moment and try again.'
+  }
+  if (lower.includes('unauthorized') || lower.includes(' 401') || lower.includes('forbidden') || lower.includes(' 403')) {
+    return 'Search service unavailable. Please try again later.'
+  }
+  if (lower.includes('timed out') || lower.includes('timeout')) {
+    return 'Search timed out. Please try again.'
+  }
+  if (lower.includes('no webset id') || lower.includes('webset failed') || lower.includes('webset canceled') || lower.includes('webset timed out')) {
+    return 'Search failed to start. Please try again.'
+  }
+  if (lower.includes('failed to get webset') || lower.includes('failed to cancel webset')) {
+    return 'Search service is unreachable. Please try again.'
+  }
+  if (lower.includes('exa_api_key not configured')) {
+    return 'Search service is not configured.'
+  }
+  if (lower.includes('no founders found')) return raw
+
+  // Generic fallback — never leak upstream provider name/details
+  return 'Search failed. Please try again.'
+}
+
 async function ensureSeedFoundersTable() {
   await sql`
     CREATE TABLE IF NOT EXISTS seed_founders (
@@ -557,8 +593,9 @@ router.post('/search', async (req, res) => {
     return res.end()
   } catch (err) {
     console.error('[seedFounders] search error:', err)
+    const safeMessage = sanitizeErrorMessage(err)
     if (!res.headersSent) {
-      return res.status(500).json({ success: false, message: err.message })
+      return res.status(500).json({ success: false, message: safeMessage })
     }
     if (err.message === 'Seeding cancelled by user') {
       if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
@@ -567,8 +604,8 @@ router.post('/search', async (req, res) => {
       return res.end()
     }
     if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
-    await updateSearchLog(searchLogId, { status: 'failed', errorMessage: err.message || 'Search failed', completed: true })
-    emitSse(res, 'error', { success: false, message: err.message || 'Search failed' })
+    await updateSearchLog(searchLogId, { status: 'failed', errorMessage: safeMessage, completed: true })
+    emitSse(res, 'error', { success: false, message: safeMessage })
     return res.end()
   }
 })
@@ -593,7 +630,7 @@ router.post('/save-batch', async (req, res) => {
     return res.json({ success: true, added, duplicates })
   } catch (err) {
     console.error('[seedFounders] save-batch error:', err)
-    return res.status(500).json({ success: false, message: err.message })
+    return res.status(500).json({ success: false, message: sanitizeErrorMessage(err) })
   }
 })
 
@@ -616,7 +653,7 @@ router.post('/save-lps-batch', async (req, res) => {
     return res.json({ success: true, added, duplicates })
   } catch (err) {
     console.error('[seedFounders] save-lps-batch error:', err)
-    return res.status(500).json({ success: false, message: err.message })
+    return res.status(500).json({ success: false, message: sanitizeErrorMessage(err) })
   }
 })
 
@@ -636,7 +673,7 @@ router.get('/lps', async (req, res) => {
     return res.json({ lps: rows })
   } catch (err) {
     console.error('[seedFounders] list lps error:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
   }
 })
 
@@ -650,10 +687,14 @@ router.get('/recent-searches', async (req, res) => {
       ORDER BY created_at DESC
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
     `
-    return res.json({ searches: rows })
+    const safeRows = rows.map((r) => ({
+      ...r,
+      error_message: r.error_message ? sanitizeErrorMessage(r.error_message) : r.error_message
+    }))
+    return res.json({ searches: safeRows })
   } catch (err) {
     console.error('[seedFounders] recent searches error:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
   }
 })
 
@@ -668,11 +709,12 @@ router.post('/search/cancel', async (req, res) => {
     try {
       upstream = await cancelWebset(websetId)
     } catch (err) {
-      upstream = { ok: false, message: err.message }
+      console.error('[seedFounders] cancel upstream error:', err)
+      upstream = { ok: false, message: sanitizeErrorMessage(err) }
     }
     return res.json({ success: true, cancelled: true, websetId, upstream })
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message })
+    return res.status(500).json({ success: false, message: sanitizeErrorMessage(err) })
   }
 })
 
@@ -705,7 +747,7 @@ router.get('/', async (req, res) => {
     return res.json({ founders: rows, statusCounts })
   } catch (err) {
     console.error('[seedFounders] list error:', err)
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
   }
 })
 
@@ -719,7 +761,7 @@ router.patch('/:id/status', async (req, res) => {
     const rows = await sql`UPDATE seed_founders SET status = ${status} WHERE id = ${id} RETURNING *`
     return res.json(rows[0])
   } catch (err) {
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
   }
 })
 
@@ -729,7 +771,7 @@ router.delete('/:id', async (req, res) => {
     await sql`DELETE FROM seed_founders WHERE id = ${req.params.id}`
     return res.json({ ok: true })
   } catch (err) {
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
   }
 })
 
@@ -739,7 +781,7 @@ router.delete('/lps/:id', async (req, res) => {
     await sql`DELETE FROM seed_lps WHERE id = ${req.params.id}`
     return res.json({ ok: true })
   } catch (err) {
-    return res.status(500).json({ error: err.message })
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
   }
 })
 
