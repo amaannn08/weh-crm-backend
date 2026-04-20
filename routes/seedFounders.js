@@ -72,6 +72,17 @@ async function ensureSeedFoundersTable() {
   `
   await sql`ALTER TABLE seed_founders ADD COLUMN IF NOT EXISTS icp_score NUMERIC(5,1) DEFAULT 0`
   await sql`ALTER TABLE seed_founders ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'`
+  await sql`
+    DELETE FROM seed_founders a USING seed_founders b
+    WHERE a.linkedin_url IS NOT NULL AND a.linkedin_url <> ''
+      AND a.linkedin_url = b.linkedin_url
+      AND a.created_at > b.created_at
+  `
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS seed_founders_linkedin_url_uidx
+    ON seed_founders (linkedin_url)
+    WHERE linkedin_url IS NOT NULL AND linkedin_url <> ''
+  `
 }
 
 async function ensureSeedLpsTable() {
@@ -97,6 +108,17 @@ async function ensureSeedLpsTable() {
   `
   await sql`ALTER TABLE seed_lps ADD COLUMN IF NOT EXISTS icp_score NUMERIC(5,1) DEFAULT 0`
   await sql`ALTER TABLE seed_lps ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'New'`
+  await sql`
+    DELETE FROM seed_lps a USING seed_lps b
+    WHERE a.linkedin_url IS NOT NULL AND a.linkedin_url <> ''
+      AND a.linkedin_url = b.linkedin_url
+      AND a.created_at > b.created_at
+  `
+  await sql`
+    CREATE UNIQUE INDEX IF NOT EXISTS seed_lps_linkedin_url_uidx
+    ON seed_lps (linkedin_url)
+    WHERE linkedin_url IS NOT NULL AND linkedin_url <> ''
+  `
 }
 
 async function ensureSeedSearchesTable() {
@@ -444,6 +466,18 @@ function extractLinkedInId(url = '') {
   return match ? match[1] : null
 }
 
+function normalizeLinkedinUrl(url = '') {
+  if (!url) return ''
+  try {
+    const u = new URL(url.trim())
+    const host = u.hostname.replace(/^www\./, '').toLowerCase()
+    const path = u.pathname.replace(/\/+$/, '').toLowerCase()
+    return `https://${host}${path}`
+  } catch {
+    return url.trim().toLowerCase().replace(/\/+$/, '')
+  }
+}
+
 function extractFields(item) {
   const props = item.properties || {}
   const person = props.person || {}
@@ -459,47 +493,79 @@ function extractFields(item) {
 }
 
 async function upsertFounder(row) {
+  const normalizedUrl = normalizeLinkedinUrl(row.linkedin_url || '')
+  const urlForInsert = normalizedUrl || null
+
   if (row.linkedin_id) {
-    await sql`
+    const inserted = await sql`
       INSERT INTO seed_founders (name, linkedin_id, linkedin_url, title, company_name,
         sector, background, location, stage, founded_year, summary, icp_score, status)
-      VALUES (${row.name}, ${row.linkedin_id}, ${row.linkedin_url}, ${row.title}, ${row.company_name},
+      VALUES (${row.name}, ${row.linkedin_id}, ${urlForInsert}, ${row.title}, ${row.company_name},
         ${row.sector}, ${row.background}, ${row.location}, ${row.stage}, ${row.founded_year},
         ${row.summary}, ${row.icp_score}, 'New')
       ON CONFLICT (linkedin_id) DO NOTHING
+      RETURNING id
     `
-    const check = await sql`SELECT id FROM seed_founders WHERE linkedin_id = ${row.linkedin_id}`
-    return check.length ? 'added' : 'duplicate'
-  } else {
-    await sql`
+    return inserted.length ? 'added' : 'duplicate'
+  }
+
+  if (normalizedUrl) {
+    const inserted = await sql`
       INSERT INTO seed_founders (name, linkedin_id, linkedin_url, title, company_name,
         sector, background, location, stage, founded_year, summary, icp_score, status)
-      VALUES (${row.name}, ${null}, ${row.linkedin_url}, ${row.title}, ${row.company_name},
+      VALUES (${row.name}, ${null}, ${normalizedUrl}, ${row.title}, ${row.company_name},
         ${row.sector}, ${row.background}, ${row.location}, ${row.stage}, ${row.founded_year},
         ${row.summary}, ${row.icp_score}, 'New')
+      ON CONFLICT (linkedin_url) WHERE linkedin_url IS NOT NULL AND linkedin_url <> '' DO NOTHING
+      RETURNING id
     `
-    return 'added'
+    return inserted.length ? 'added' : 'duplicate'
   }
+
+  await sql`
+    INSERT INTO seed_founders (name, linkedin_id, linkedin_url, title, company_name,
+      sector, background, location, stage, founded_year, summary, icp_score, status)
+    VALUES (${row.name}, ${null}, ${null}, ${row.title}, ${row.company_name},
+      ${row.sector}, ${row.background}, ${row.location}, ${row.stage}, ${row.founded_year},
+      ${row.summary}, ${row.icp_score}, 'New')
+  `
+  return 'added'
 }
 
 async function upsertLp(row) {
+  const normalizedUrl = normalizeLinkedinUrl(row.linkedin_url || '')
+  const urlForInsert = normalizedUrl || null
+
   if (row.linkedin_id) {
-    await sql`
+    const inserted = await sql`
       INSERT INTO seed_lps (name, linkedin_id, linkedin_url, title, company_name,
         sector, background, location, stage, founded_year, summary, icp_score, status)
-      VALUES (${row.name}, ${row.linkedin_id}, ${row.linkedin_url}, ${row.title}, ${row.company_name},
+      VALUES (${row.name}, ${row.linkedin_id}, ${urlForInsert}, ${row.title}, ${row.company_name},
         ${row.sector}, ${row.background}, ${row.location}, ${row.stage}, ${row.founded_year},
         ${row.summary}, ${row.icp_score}, 'New')
       ON CONFLICT (linkedin_id) DO NOTHING
+      RETURNING id
     `
-    const check = await sql`SELECT id FROM seed_lps WHERE linkedin_id = ${row.linkedin_id}`
-    return check.length ? 'added' : 'duplicate'
+    return inserted.length ? 'added' : 'duplicate'
+  }
+
+  if (normalizedUrl) {
+    const inserted = await sql`
+      INSERT INTO seed_lps (name, linkedin_id, linkedin_url, title, company_name,
+        sector, background, location, stage, founded_year, summary, icp_score, status)
+      VALUES (${row.name}, ${null}, ${normalizedUrl}, ${row.title}, ${row.company_name},
+        ${row.sector}, ${row.background}, ${row.location}, ${row.stage}, ${row.founded_year},
+        ${row.summary}, ${row.icp_score}, 'New')
+      ON CONFLICT (linkedin_url) WHERE linkedin_url IS NOT NULL AND linkedin_url <> '' DO NOTHING
+      RETURNING id
+    `
+    return inserted.length ? 'added' : 'duplicate'
   }
 
   await sql`
     INSERT INTO seed_lps (name, linkedin_id, linkedin_url, title, company_name,
       sector, background, location, stage, founded_year, summary, icp_score, status)
-    VALUES (${row.name}, ${null}, ${row.linkedin_url}, ${row.title}, ${row.company_name},
+    VALUES (${row.name}, ${null}, ${null}, ${row.title}, ${row.company_name},
       ${row.sector}, ${row.background}, ${row.location}, ${row.stage}, ${row.founded_year},
       ${row.summary}, ${row.icp_score}, 'New')
   `
