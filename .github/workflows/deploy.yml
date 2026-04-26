@@ -55,15 +55,16 @@ jobs:
         run: |
           echo "$SSH_PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
+          SSH_OPTS="-i private_key.pem -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o TCPKeepAlive=yes"
 
           # Copy deployment package to EC2
-          scp -i private_key.pem -o StrictHostKeyChecking=no \
+          scp $SSH_OPTS \
             deploy.tar.gz ${EC2_USERNAME}@${EC2_HOST}:/tmp/
 
           # SSH into EC2 and deploy
-          ssh -i private_key.pem -o StrictHostKeyChecking=no \
+          ssh $SSH_OPTS \
             ${EC2_USERNAME}@${EC2_HOST} << 'EOF'
-            set -e
+            set -euo pipefail
 
             APP_DIR=/var/www/express-app
 
@@ -91,7 +92,7 @@ jobs:
 
             echo ""
             echo "Installing production dependencies..."
-            npm ci --omit=dev
+            npm ci --omit=dev --no-audit --no-fund --verbose
 
             # Create default .env only if it does not exist
             if [ ! -f .env ]; then
@@ -127,7 +128,7 @@ jobs:
           echo "Waiting for application to start..."
           sleep 10
 
-          for i in {1..2}; do
+          for i in {1..5}; do
             echo "Attempt $i of 5..."
             response=$(curl -s -o /dev/null -w "%{http_code}" http://${EC2_HOST}/health || echo "000")
 
@@ -140,7 +141,7 @@ jobs:
             sleep 5
           done
 
-          echo "❌ Deployment verification failed after 2 attempts"
+          echo "❌ Deployment verification failed after 5 attempts"
           echo "Please check PM2 logs on the server"
           exit 1
 
@@ -155,10 +156,11 @@ jobs:
 
           echo "$SSH_PRIVATE_KEY" > private_key.pem
           chmod 600 private_key.pem
+          SSH_OPTS="-i private_key.pem -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o TCPKeepAlive=yes"
 
-          ssh -i private_key.pem -o StrictHostKeyChecking=no \
+          ssh $SSH_OPTS \
             ${EC2_USERNAME}@${EC2_HOST} << 'EOF'
-            set -e
+            set -euo pipefail
 
             APP_DIR=/var/www/express-app
             cd "$APP_DIR"
@@ -170,7 +172,7 @@ jobs:
             if [ -n "$latest_backup" ]; then
               echo "Found backup: $latest_backup"
               tar -xzf "$latest_backup" -C "$APP_DIR"
-              npm ci --omit=dev
+              npm ci --omit=dev --no-audit --no-fund --verbose
               if pm2 describe weh-backend > /dev/null 2>&1; then
                 pm2 reload weh-backend
               else
