@@ -7,7 +7,9 @@ import { embed } from '../services/embeddings.js'
 import { extractDealFromTranscript } from '../services/dealExtraction.js'
 import { scoreAndSaveFounder, mergeScoresForCompanyIdentity } from '../services/founderScoring.js'
 import {
+  deriveCompanyNameFromDomain,
   isCompanyNameMissing,
+  isPlainGmailDomain,
   normalizeCompanyName,
   pickBestNonWehDomainFromTranscript,
   resolveCompanyNameFallback
@@ -166,12 +168,24 @@ async function upsertDiscoveredFile(file) {
 
 async function getTrackingStatus(driveFileId) {
   const rows = await sql`
-    SELECT status
+    SELECT status, last_attempt_at
     FROM drive_transcript_ingestion_status
     WHERE drive_file_id = ${driveFileId}
     LIMIT 1
   `
-  return rows[0]?.status || 'pending'
+  return rows[0] || { status: 'pending', last_attempt_at: null }
+}
+
+function isStaleProcessing(lastAttemptAt) {
+  if (!lastAttemptAt) return false
+  const timeoutMinutesRaw = Number(process.env.DRIVE_INGEST_STALE_PROCESSING_MINUTES || '180')
+  const timeoutMinutes = Number.isFinite(timeoutMinutesRaw) && timeoutMinutesRaw > 0
+    ? timeoutMinutesRaw
+    : 180
+  const lastAttemptMs = new Date(lastAttemptAt).getTime()
+  if (!Number.isFinite(lastAttemptMs)) return false
+  const ageMs = Date.now() - lastAttemptMs
+  return ageMs > timeoutMinutes * 60 * 1000
 }
 
 async function markProcessing(file) {
@@ -225,6 +239,23 @@ function deriveRiskLevel(investorReaction) {
   return null
 }
 
+async function refreshDealMeetingDate(dealId, meetingDate) {
+  if (!dealId || !meetingDate) return
+  await sql`
+    UPDATE deals
+    SET
+      meeting_date = CASE
+        WHEN meeting_date IS NULL THEN ${meetingDate}::date
+        ELSE GREATEST(meeting_date, ${meetingDate}::date)
+      END,
+      date = CASE
+        WHEN date IS NULL THEN ${meetingDate}::date
+        ELSE GREATEST(date, ${meetingDate}::date)
+      END
+    WHERE id = ${dealId}
+  `
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Full per-file ingest: meeting → deal → founder scores
 // ─────────────────────────────────────────────────────────────────────────────
@@ -258,18 +289,23 @@ async function ingestFile(drive, file) {
   }
 
   const extractedCompany = extraction.company || ''
-  const companyMissing = isCompanyNameMissing(extractedCompany)
-  const resolvedCompanyName = await resolveCompanyNameFallback({
-    company: extraction.company,
-    founderName: extraction.founder_name
-  })
   const companyDomain = pickBestNonWehDomainFromTranscript(transcript)
+  const domainDerivedCompany = deriveCompanyNameFromDomain(companyDomain)
+  const shouldUseTranscriptFallback = !companyDomain || isPlainGmailDomain(companyDomain)
+  const prioritizedCompany = domainDerivedCompany || extraction.company
+  const companyMissing = isCompanyNameMissing(prioritizedCompany)
+  const resolvedCompanyName = shouldUseTranscriptFallback
+    ? await resolveCompanyNameFallback({
+      company: extraction.company,
+      founderName: extraction.founder_name
+    })
+    : (domainDerivedCompany || extraction.company || null)
   const meetingDate = extraction.meeting_date || null
 
   // 1. Store meeting with embedding
   const embedding = await embed(transcript)
   const vectorStr = formatVector(embedding)
-  const companyForMeeting = companyMissing ? null : (extraction.company || null)
+  const companyForMeeting = companyMissing ? null : (prioritizedCompany || null)
 
   const meetingRows = await sql`
     INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding, company)
@@ -289,7 +325,7 @@ async function ingestFile(drive, file) {
     dealId = byFile.id
   } else {
     identityDecision = await evaluateDealIdentity({
-      extractedCompany,
+      extractedCompany: prioritizedCompany,
       companyDomain,
       companyMissing
     })
@@ -336,8 +372,8 @@ async function ingestFile(drive, file) {
         sourceType: 'drive',
         sourceFileId: file.id,
         sourceFileName: file.name ?? null,
-        extractedCompany: extraction.company || null,
-        normalizedCompany: normalizeCompanyName(extraction.company),
+        extractedCompany: prioritizedCompany || null,
+        normalizedCompany: normalizeCompanyName(prioritizedCompany),
         extractedDomain: companyDomain,
         candidateDealIds: identityDecision.candidateDeals.map((deal) => deal.id),
         pendingDealId: dealId,
@@ -371,9 +407,10 @@ async function ingestFile(drive, file) {
   await scoreAndSaveFounder({ dealId, transcript, extraction })
 
   if (matchedExistingIdentity) {
+    await refreshDealMeetingDate(dealId, meetingDate)
     await mergeScoresForCompanyIdentity({
       dealId,
-      companyName: companyMissing ? null : extractedCompany,
+      companyName: companyMissing ? null : prioritizedCompany,
       companyDomain
     })
   }
@@ -381,7 +418,7 @@ async function ingestFile(drive, file) {
   console.log(`${label}: fully ingested → deal ${dealId}`)
   return {
     status: 'processed',
-    companyName: companyMissing ? null : (extractedCompany || null)
+    companyName: companyMissing ? null : (prioritizedCompany || null)
   }
 }
 
@@ -401,14 +438,30 @@ export async function runDriveIngest() {
   let processed = 0
   let skipped = 0
   let errors = 0
+  const skipReasons = {
+    success: 0,
+    processing: 0,
+    unsupported: 0
+  }
+  let staleRecovered = 0
 
   for (const file of files) {
     await upsertDiscoveredFile(file)
 
-    const trackingStatus = await getTrackingStatus(file.id)
-    const shouldProcess = trackingStatus === 'pending' || trackingStatus === 'failed'
+    const tracking = await getTrackingStatus(file.id)
+    const staleProcessing = tracking.status === 'processing' && isStaleProcessing(tracking.last_attempt_at)
+    if (staleProcessing) {
+      staleRecovered++
+      await markFailed(file, 'stale processing status recovered for retry')
+    }
+
+    const effectiveStatus = staleProcessing ? 'failed' : tracking.status
+    const shouldProcess = effectiveStatus === 'pending' || effectiveStatus === 'failed'
     if (!shouldProcess) {
       skipped++
+      if (effectiveStatus === 'success') skipReasons.success++
+      else if (effectiveStatus === 'processing') skipReasons.processing++
+      else skipReasons.unsupported++
       continue
     }
 
@@ -429,7 +482,14 @@ export async function runDriveIngest() {
     }
   }
 
-  const summary = { processed, skipped, errors, total: files.length }
+  const summary = {
+    processed,
+    skipped,
+    errors,
+    total: files.length,
+    staleRecovered,
+    skipReasons
+  }
   console.log('[driveIngest] Done:', summary)
   return summary
 }

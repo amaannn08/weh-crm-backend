@@ -4,7 +4,9 @@ import { extractDealFromTranscript } from './dealExtraction.js'
 import { mergeScoresForCompanyIdentity, scoreAndSaveFounder } from './founderScoring.js'
 import { getDefaultDocsDir, listDocxFiles, readDocxFile } from './docxReader.js'
 import {
+  deriveCompanyNameFromDomain,
   isCompanyNameMissing,
+  isPlainGmailDomain,
   normalizeCompanyName,
   pickBestNonWehDomainFromTranscript,
   resolveCompanyNameFallback
@@ -42,6 +44,23 @@ function deriveRiskLevel(investorReaction) {
   if (level.includes('medium')) return 'Medium'
   if (level.includes('low')) return 'High'
   return null
+}
+
+async function refreshDealMeetingDate(dealId, meetingDate) {
+  if (!dealId || !meetingDate) return
+  await sql`
+    UPDATE deals
+    SET
+      meeting_date = CASE
+        WHEN meeting_date IS NULL THEN ${meetingDate}::date
+        ELSE GREATEST(meeting_date, ${meetingDate}::date)
+      END,
+      date = CASE
+        WHEN date IS NULL THEN ${meetingDate}::date
+        ELSE GREATEST(date, ${meetingDate}::date)
+      END
+    WHERE id = ${dealId}
+  `
 }
 
 export async function ingestDocs({ limit, dryRun } = {}) {
@@ -89,10 +108,16 @@ export async function ingestDocs({ limit, dryRun } = {}) {
 
       const extractedCompany = extraction.company || ''
       const companyDomain = pickBestNonWehDomainFromTranscript(transcript)
-      const companyMissing = isCompanyNameMissing(extractedCompany)
+      const domainDerivedCompany = deriveCompanyNameFromDomain(companyDomain)
+      const shouldUseTranscriptFallback = !companyDomain || isPlainGmailDomain(companyDomain)
+      const prioritizedCompany = domainDerivedCompany || extractedCompany
+      const companyMissing = isCompanyNameMissing(prioritizedCompany)
 
       // 1) Resolve/Create Company Record
-      const entityDecision = await resolveCompanyEntity(extractedCompany, extraction.founder_name)
+      const entityDecision = await resolveCompanyEntity(
+        shouldUseTranscriptFallback ? extractedCompany : prioritizedCompany,
+        extraction.founder_name
+      )
       let finalCompanyId = entityDecision.company_id
 
       if (entityDecision.is_new || finalCompanyId <= 0) {
@@ -121,13 +146,19 @@ export async function ingestDocs({ limit, dryRun } = {}) {
         }
       }
 
-      const resolvedCompanyName = entityDecision.canonical_name || extractedCompany
+      const resolvedCompanyName = shouldUseTranscriptFallback
+        ? (entityDecision.canonical_name
+          || await resolveCompanyNameFallback({
+            company: extractedCompany,
+            founderName: extraction.founder_name
+          }))
+        : (entityDecision.canonical_name || prioritizedCompany)
 
       let meetingId = existingMeeting?.id
       if (!meetingId) {
         const embedding = await embed(transcript)
         const vectorStr = formatVector(embedding)
-        const companyForMeeting = companyMissing ? null : (extraction.company || null)
+        const companyForMeeting = companyMissing ? null : (prioritizedCompany || null)
 
         const meetingRows = await sql`
           INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding, company)
@@ -148,7 +179,7 @@ export async function ingestDocs({ limit, dryRun } = {}) {
 
       if (!dealId) {
         identityDecision = await evaluateDealIdentity({
-          extractedCompany,
+          extractedCompany: prioritizedCompany,
           companyDomain,
           companyMissing
         })
@@ -211,8 +242,8 @@ export async function ingestDocs({ limit, dryRun } = {}) {
             sourceType: 'docs',
             sourceFileId: file.name,
             sourceFileName: file.name,
-            extractedCompany: extraction.company || null,
-            normalizedCompany: normalizeCompanyName(extraction.company),
+            extractedCompany: prioritizedCompany || null,
+            normalizedCompany: normalizeCompanyName(prioritizedCompany),
             extractedDomain: companyDomain,
             candidateDealIds: identityDecision?.candidateDeals?.map((deal) => deal.id) || [],
             pendingDealId: dealId,
@@ -234,9 +265,10 @@ export async function ingestDocs({ limit, dryRun } = {}) {
       })
 
       if (matchedExistingIdentity) {
+        await refreshDealMeetingDate(dealId, meetingDate)
         await mergeScoresForCompanyIdentity({
           dealId,
-          companyName: companyMissing ? null : extractedCompany,
+          companyName: companyMissing ? null : prioritizedCompany,
           companyDomain
         })
       }

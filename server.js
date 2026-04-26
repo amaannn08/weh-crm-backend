@@ -100,6 +100,8 @@ if (driveIngestEnabled) {
   } else {
     console.warn(`[cron] Invalid DRIVE_INGEST_CRON expression: "${driveIngestCron}" — cron disabled`)
   }
+} else {
+  console.log('[cron] Drive transcript ingest disabled (DRIVE_INGEST_CRON_ENABLED != "true")')
 }
 
 app.listen(PORT, '0.0.0.0', () => {

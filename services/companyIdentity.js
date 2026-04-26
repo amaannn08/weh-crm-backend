@@ -12,6 +12,8 @@ function getWehDomains() {
 const DEFAULT_EMAIL_REGEX =
   /\b[a-z0-9._%+-]+@([a-z0-9.-]+\.[a-z]{2,})\b/gi
 
+const PLAIN_GMAIL_DOMAIN = 'gmail.com'
+
 function cleanDomain(domain) {
   if (!domain || typeof domain !== 'string') return null
   const cleaned = domain
@@ -39,6 +41,32 @@ export function pickBestNonWehDomainFromTranscript(transcript) {
   const candidates = extractCandidateDomainsFromTranscript(transcript)
   const nonWeh = candidates.filter((d) => !wehDomains.has(d))
   return nonWeh[0] ?? null
+}
+
+export function isPlainGmailDomain(domain) {
+  return cleanDomain(domain) === PLAIN_GMAIL_DOMAIN
+}
+
+function labelizeDomainPart(part) {
+  if (!part) return null
+  const normalized = part
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!normalized) return null
+  return normalized
+    .split(' ')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+export function deriveCompanyNameFromDomain(domain) {
+  const cleaned = cleanDomain(domain)
+  if (!cleaned) return null
+  if (isPlainGmailDomain(cleaned)) return null
+  const [root] = cleaned.split('.')
+  return labelizeDomainPart(root)
 }
 
 export function isCompanyNameMissing(company) {
