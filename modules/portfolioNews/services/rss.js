@@ -1,6 +1,7 @@
 import Parser from 'rss-parser'
 import crypto from 'crypto'
 import { classifySentiment } from './sentiment.js'
+import { checkRelevance } from './relevance.js'
 import { query } from '../db.js'
 
 const parser = new Parser({
@@ -82,7 +83,7 @@ export async function ingestRssForCompany(company) {
       let inserted = 0
       let deduped = 0
       let skippedNoTitle = 0
-
+      let irrelevant = 0
       for (const { item, matchedVariant } of matches) {
         const result = await upsertNewsItem({
           company,
@@ -94,7 +95,6 @@ export async function ingestRssForCompany(company) {
           publishedAt: item.pubDate ? new Date(item.pubDate) : new Date(),
           matchedVariant
         })
-
         if (result.inserted) {
           totalSaved += 1
           inserted += 1
@@ -102,6 +102,8 @@ export async function ingestRssForCompany(company) {
           skippedNoTitle += 1
         } else if (result.reason === 'dedup') {
           deduped += 1
+        } else if (result.reason === 'irrelevant') {
+          irrelevant += 1
         }
       }
 
@@ -113,6 +115,7 @@ export async function ingestRssForCompany(company) {
           feedUrl: source.feed_url,
           matched: matches.length,
           inserted,
+          irrelevant,
           deduped,
           skippedNoTitle
         })
@@ -187,6 +190,24 @@ export async function upsertNewsItem({
   matchedVariant
 }) {
   if (!title) return { inserted: false, reason: 'no_title' }
+
+  // LLM relevance gate — drop articles that only keyword-matched but aren't
+  // actually about this company
+  const { relevant, reason: relevanceReason } = await checkRelevance({
+    title,
+    summary: rawSummary || '',
+    companyName: company.name,
+    companySlug: company.slug
+  })
+  if (!relevant) {
+    console.log('[rss] Skipped irrelevant article', {
+      companySlug: company.slug,
+      companyName: company.name,
+      title: title.slice(0, 120),
+      reason: relevanceReason
+    })
+    return { inserted: false, reason: 'irrelevant' }
+  }
 
   const hash = crypto
     .createHash('sha256')

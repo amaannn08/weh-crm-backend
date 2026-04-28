@@ -63,6 +63,7 @@ export async function scrapeForCompany(company) {
       let inserted = 0
       let deduped = 0
       let skippedNoTitle = 0
+      let irrelevant = 0
       for (const article of articles) {
         const result = await upsertNewsItem({
           company,
@@ -80,6 +81,8 @@ export async function scrapeForCompany(company) {
           deduped += 1
         } else if (result.reason === 'no_title') {
           skippedNoTitle += 1
+        } else if (result.reason === 'irrelevant') {
+          irrelevant += 1
         }
       }
       if (articles.length > 0) {
@@ -90,6 +93,7 @@ export async function scrapeForCompany(company) {
           url: target.url,
           articleCount: articles.length,
           inserted,
+          irrelevant,
           deduped,
           skippedNoTitle
         })
