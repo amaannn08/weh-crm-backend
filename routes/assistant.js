@@ -20,9 +20,8 @@ You have access to three kinds of information:
 
 Rules:
 - Treat MEETING TRANSCRIPTS, COMPANY DATA, and GOOGLE SHEET DATA as your factual sources.
-- CRITICAL: When GOOGLE SHEET DATA is present, trust the numbers exactly as written.
-  The fields "ROWS MATCHING FILTERS" and "COUNT BY YEAR" are computed precisely by code — do NOT second-guess them.
-  If it says "COUNT BY YEAR: 2026: 71" then the answer for 2026 is exactly 71. Do not say 0 or estimate.
+- CRITICAL: Trust the numbers exactly as written in the data provided. Do not guess or estimate.
+- VERY IMPORTANT: DO NOT mention the internal name of the data source (e.g., "GOOGLE SHEET DATA", "PIPELINE DATA", "CRM", "COMPANY DATA") in your response. Present the information seamlessly and naturally as if you simply know the answer.
 - Use CHAT HISTORY only to resolve references (like "they", "their"), not as evidence.
 - Do NOT invent names, numbers, or facts not present in the provided data.
 - If the data does not contain the answer, say so clearly.
@@ -136,20 +135,26 @@ router.post('/chat', async (req, res) => {
           sheetDataSection += `GOOGLE SHEET DATA (LIVE):\n\n${result.sheetContext}\n\n`
         }
 
-        if (tool.id === 'list_all_deals' && result?.deals) {
-          const filterLabel = result.status && result.status !== 'all'
-            ? `Status filter: ${result.status}`
-            : 'All deals'
-          const lines = result.deals.map((d) => {
-            const parts = []
-            if (d.company)               parts.push(d.company)
-            if (d.status)                parts.push(`[${d.status}]`)
-            if (d.sector)                parts.push(`sector: ${d.sector}`)
-            if (d.founder_final_score != null) parts.push(`score: ${d.founder_final_score}`)
-            if (d.poc)                   parts.push(`POC: ${d.poc}`)
-            return `- ${parts.join(' | ')}`
-          })
-          pipelineDataSection = `PIPELINE DATA (${filterLabel} — ${result.deals.length} deals):\n\n${lines.join('\n')}\n\n`
+        if (tool.id === 'list_all_deals') {
+          if (result?.total_deals !== undefined) {
+             const filterLabel = result.status && result.status !== 'all' ? `Status filter: ${result.status}` : 'All deals'
+             const yearLabel = result.year && result.year !== 'all' ? `Year: ${result.year}` : 'All time'
+             pipelineDataSection = `PIPELINE DATA (${filterLabel}, ${yearLabel}):\n\nTotal count of deals matching criteria: ${result.total_deals}\n\n`
+          } else if (result?.deals) {
+            const filterLabel = result.status && result.status !== 'all'
+              ? `Status filter: ${result.status}`
+              : 'All deals'
+            const lines = result.deals.map((d) => {
+              const parts = []
+              if (d.company)               parts.push(d.company)
+              if (d.status)                parts.push(`[${d.status}]`)
+              if (d.sector)                parts.push(`sector: ${d.sector}`)
+              if (d.founder_final_score != null) parts.push(`score: ${d.founder_final_score}`)
+              if (d.poc)                   parts.push(`POC: ${d.poc}`)
+              return `- ${parts.join(' | ')}`
+            })
+            pipelineDataSection = `PIPELINE DATA (${filterLabel} — ${result.deals.length} deals):\n\n${lines.join('\n')}\n\n`
+          }
         }
       }
     }
@@ -167,7 +172,7 @@ router.post('/chat', async (req, res) => {
     const historySection = historyBlob
       ? `CHAT HISTORY (CONVERSATION ONLY — NOT GROUND TRUTH):\n\n${historyBlob}\n\n`
       : ''
-    const taskSection = `TASK:\n\nAnswer the user's latest question using ONLY the data provided above. Trust numbers in GOOGLE SHEET DATA exactly as written — they are computed by code. If COUNT BY YEAR is present, read the exact number from it to answer count questions. Do not estimate or say 0 if data is present.\n\nUser question:\n${message}`
+    const taskSection = `TASK:\n\nAnswer the user's latest question using ONLY the data provided above. Trust the numbers exactly as written in the data. If a specific count (like COUNT BY YEAR or Total count of deals) is present, use that exact number. Do not estimate or assume 0 if data is present. Do not mention internal data source names in your response.\n\nUser question:\n${message}`
 
     // Sheet data comes first so it isn't buried under transcripts
     const userContent = `${sheetDataSection}${companyDataSection}${pipelineDataSection}${meetingSection}${historySection}${taskSection}`

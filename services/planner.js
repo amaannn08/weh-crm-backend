@@ -8,7 +8,7 @@ Available tools:
   - Always set "query" to the user's question.
   - If a SPECIFIC company is mentioned by name, also set "company" to that company name.
 - deal_lookup_by_company: fetches structured CRM data for a SPECIFIC named company (score, stage, status, POC, sector, risks, etc). Use when the user asks about a specific company's details.
-- list_all_deals: fetches all deals (optionally filtered by status). Use for broad pipeline questions like "what companies are in portfolio?", "how many active deals?", "show all deals", "what's the average score?", "highest/lowest founder score", "founder score ranking".
+- list_all_deals: fetches all deals (optionally filtered by status and year). Use for broad pipeline questions like "what companies are in portfolio?", "how many active deals?", "how many deals in 2026?", "show all deals", "what's the average score?". Use this tool specifically when the user asks to count deals.
 - sheet_query: queries the WEH Ventures Google Sheet. ALWAYS set "tab" explicitly. Can be called multiple times for cross-tab questions.
 
   Sheet tab schemas (exact columns):
@@ -39,10 +39,13 @@ Rules:
 - For topic searches with no specific company: call meeting_search (without company).
 - For founder score questions ("highest founder score", "founder score ranking", "which company has best score"): call list_all_deals — founder_final_score is in the CRM database, NOT the sheet.
 - For conviction score questions ("conviction score for X", "highest conviction"): call sheet_query with tab="Team meetings" — Conviction Score is in the sheet.
+- For counting or listing "deals", ALWAYS use list_all_deals. Do not use sheet_query for questions explicitly asking about "deals".
+- If the user asks broadly "how many companies/startups we talked to" (or similar), you MUST call BOTH list_all_deals (to get CRM deal counts) AND sheet_query (to get sheet contact counts).
 - For sheet-specific questions (inbound/outbound contacts, referrals, explicit "in the sheet"): call sheet_query with the correct tab.
   - If user asks about multiple tabs (e.g. "compare inbound vs outbound"): call sheet_query TWICE with different tabs.
   - Always set filterMonth/filterYear if the question implies a time range.
-- If it's a simple conversational follow-up with no new data needed, call no tools.
+- If it's a simple conversational follow-up, evaluate if a new data type is requested. If the user asks about "companies" and then says "and deals?", YOU MUST CALL list_all_deals. Do not just rely on conversation history for new queries.
+- Only call no tools if absolutely no new data or database lookup is needed.
 - Never call list_all_deals and deal_lookup_by_company for the same query.`
 
 /**
