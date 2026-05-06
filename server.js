@@ -7,7 +7,7 @@ import assistantRoutes from './routes/assistant.js'
 import conversationRoutes from './routes/conversations.js'
 import dealsRoutes from './routes/deals.js'
 import meetingsRoutes from './routes/meetings.js'
-import seedFoundersRoutes from './routes/seedFounders.js'
+import seedFoundersRoutes, { runSavedSearch } from './routes/seedFounders.js'
 import portfolioNewsRoutes from './modules/portfolioNews/routes/news.js'
 import portfolioCompaniesRoutes from './modules/portfolioNews/routes/companies.js'
 import portfolioNewslettersRoutes from './modules/portfolioNews/routes/newsletters.js'
@@ -16,6 +16,7 @@ import { authMiddleware } from './middleware/auth.js'
 import { initSchema } from './db/neon.js'
 import { runIngest } from './modules/portfolioNews/jobs/ingest.js'
 import { runDriveIngest } from './pipelines/driveIngestion.js'
+import { sql } from './db/neon.js'
 
 const app = express()
 const PORT = process.env.PORT ?? 3000
@@ -103,6 +104,29 @@ if (driveIngestEnabled) {
 } else {
   console.log('[cron] Drive transcript ingest disabled (DRIVE_INGEST_CRON_ENABLED != "true")')
 }
+
+// Weekly saved search cron — runs every Monday at 8am
+const savedSearchCron = process.env.SAVED_SEARCH_CRON || '0 8 * * 1'
+cron.schedule(savedSearchCron, async () => {
+  console.log('[cron] Running weekly saved searches...')
+  try {
+    const due = await sql`
+      SELECT id, name FROM seed_saved_searches
+      WHERE next_run_at IS NULL OR next_run_at <= now()
+    `
+    console.log(`[cron] ${due.length} saved search(es) due`)
+    for (const s of due) {
+      try {
+        await runSavedSearch(s.id)
+      } catch (e) {
+        console.error(`[cron] Saved search "${s.name}" failed:`, e.message)
+      }
+    }
+  } catch (e) {
+    console.error('[cron] Saved search cron error:', e.message)
+  }
+})
+console.log(`[cron] Saved search weekly cron scheduled: ${savedSearchCron}`)
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server listening on http://localhost:${PORT}`)

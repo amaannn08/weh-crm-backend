@@ -37,6 +37,7 @@ Rules:
 - For company-specific questions: call BOTH meeting_search (with company set) AND deal_lookup_by_company.
 - For broad pipeline questions: call list_all_deals only.
 - For topic searches with no specific company: call meeting_search (without company).
+- If the question asks for "top/best deals/companies in <theme>" (e.g. deeptech, climate, AI) or asks for similar/related deals, treat it as thematic similarity search and call meeting_search. You may also call list_all_deals if structured ranking/filtering is explicitly requested.
 - For founder score questions ("highest founder score", "founder score ranking", "which company has best score"): call list_all_deals — founder_final_score is in the CRM database, NOT the sheet.
 - For conviction score questions ("conviction score for X", "highest conviction"): call sheet_query with tab="Team meetings" — Conviction Score is in the sheet.
 - For counting or listing "deals", ALWAYS use list_all_deals. Do not use sheet_query for questions explicitly asking about "deals".
@@ -100,6 +101,25 @@ export async function planWithLLM({ tools, userMessage, historyBlob }) {
     }
     return { id: tc.function.name, input }
   })
+
+  // Guardrail: thematic queries like "top deals in deeptech" often need
+  // semantic retrieval even if the router picked only structured deal listing.
+  const lower = trimmed.toLowerCase()
+  const hasMeetingSearch = plannedTools.some((t) => t.id === 'meeting_search')
+  const hasListAllDeals = plannedTools.some((t) => t.id === 'list_all_deals')
+  const looksSimilarityIntent =
+    /\b(similar|similarity|related|relevant|closest|like|theme|thematic)\b/.test(lower) ||
+    /\b(top|best)\b.*\b(in|for|around)\b/.test(lower) ||
+    /\b(deals?|companies|startups?)\b.*\b(in|for|around|about)\b/.test(lower)
+  const looksPureCountIntent =
+    /\b(how many|count|number of|total)\b/.test(lower)
+
+  if (hasListAllDeals && !hasMeetingSearch && looksSimilarityIntent && !looksPureCountIntent) {
+    plannedTools.push({
+      id: 'meeting_search',
+      input: { query: trimmed }
+    })
+  }
 
   return { action: 'call_tools', tools: plannedTools }
 }

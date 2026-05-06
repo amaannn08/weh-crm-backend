@@ -144,6 +144,29 @@ async function ensureSeedSearchesTable() {
   await sql`ALTER TABLE seed_searches ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`
 }
 
+async function ensureSavedSearchTables() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS seed_saved_searches (
+      id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name        TEXT NOT NULL,
+      params_json JSONB NOT NULL,
+      last_run_at TIMESTAMPTZ,
+      next_run_at TIMESTAMPTZ,
+      created_at  TIMESTAMPTZ DEFAULT now()
+    )
+  `
+  await sql`
+    CREATE TABLE IF NOT EXISTS seed_saved_search_results (
+      id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      saved_search_id  UUID NOT NULL REFERENCES seed_saved_searches(id) ON DELETE CASCADE,
+      run_at           TIMESTAMPTZ DEFAULT now(),
+      results_json     JSONB NOT NULL DEFAULT '[]',
+      results_count    INTEGER DEFAULT 0
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_saved_search_results_search_id ON seed_saved_search_results(saved_search_id)`
+}
+
 async function createSearchLog({ query, params }) {
   const rows = await sql`
     INSERT INTO seed_searches (query_text, params_json, status)
@@ -847,6 +870,149 @@ router.delete('/lps/:id', async (req, res) => {
     await sql`DELETE FROM seed_lps WHERE id = ${req.params.id}`
     return res.json({ ok: true })
   } catch (err) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// ─── Saved Searches ──────────────────────────────────────────────────────────
+
+export async function runSavedSearch(savedSearchId) {
+  await ensureSavedSearchTables()
+  const rows = await sql`SELECT * FROM seed_saved_searches WHERE id = ${savedSearchId} LIMIT 1`
+  const saved = rows[0]
+  if (!saved) throw new Error('Saved search not found')
+
+  const params = saved.params_json || {}
+  const count = Math.min(params.count || 25, 100)
+  const query = buildQuery(params)
+  const criteria = buildCriteria(params)
+
+  console.log(`[savedSearch] running "${saved.name}" (id=${savedSearchId})`)
+
+  const websetId = await createWebset(query, criteria, count)
+  canceledWebsets.delete(websetId)
+
+  const results = await streamWebsetWithAdaptivePolling(
+    websetId, params, () => {}, () => false
+  )
+
+  const resultRow = await sql`
+    INSERT INTO seed_saved_search_results (saved_search_id, results_json, results_count)
+    VALUES (${savedSearchId}, ${JSON.stringify(results)}::jsonb, ${results.length})
+    RETURNING id
+  `
+
+  const nextRun = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+  await sql`
+    UPDATE seed_saved_searches
+    SET last_run_at = now(), next_run_at = ${nextRun.toISOString()}
+    WHERE id = ${savedSearchId}
+  `
+
+  console.log(`[savedSearch] done "${saved.name}" — ${results.length} results, next run ${nextRun.toISOString()}`)
+  return { resultId: resultRow[0]?.id, count: results.length }
+}
+
+// POST /seed-founders/saved-searches
+router.post('/saved-searches', async (req, res) => {
+  try {
+    await ensureSavedSearchTables()
+    const { name, params } = req.body || {}
+    if (!name?.trim()) return res.status(400).json({ error: 'name is required' })
+    if (!params || typeof params !== 'object') return res.status(400).json({ error: 'params is required' })
+
+    const nextRun = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    const rows = await sql`
+      INSERT INTO seed_saved_searches (name, params_json, next_run_at)
+      VALUES (${name.trim()}, ${JSON.stringify(params)}::jsonb, ${nextRun.toISOString()})
+      RETURNING *
+    `
+    return res.status(201).json(rows[0])
+  } catch (err) {
+    console.error('[savedSearch] create error:', err)
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// GET /seed-founders/saved-searches
+router.get('/saved-searches', async (req, res) => {
+  try {
+    await ensureSavedSearchTables()
+    const rows = await sql`
+      SELECT ss.*, COUNT(ssr.id)::int AS run_count
+      FROM seed_saved_searches ss
+      LEFT JOIN seed_saved_search_results ssr ON ssr.saved_search_id = ss.id
+      GROUP BY ss.id
+      ORDER BY ss.created_at DESC
+    `
+    return res.json({ savedSearches: rows })
+  } catch (err) {
+    console.error('[savedSearch] list error:', err)
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// DELETE /seed-founders/saved-searches/:id
+router.delete('/saved-searches/:id', async (req, res) => {
+  try {
+    await ensureSavedSearchTables()
+    await sql`DELETE FROM seed_saved_searches WHERE id = ${req.params.id}`
+    return res.json({ ok: true })
+  } catch (err) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// GET /seed-founders/saved-searches/:id/results
+router.get('/saved-searches/:id/results', async (req, res) => {
+  try {
+    await ensureSavedSearchTables()
+    const { id } = req.params
+    const { limit = 10, offset = 0 } = req.query
+
+    const savedRows = await sql`SELECT * FROM seed_saved_searches WHERE id = ${id} LIMIT 1`
+    if (!savedRows[0]) return res.status(404).json({ error: 'Saved search not found' })
+
+    const runs = await sql`
+      SELECT id, run_at, results_count
+      FROM seed_saved_search_results
+      WHERE saved_search_id = ${id}
+      ORDER BY run_at DESC
+      LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+    `
+    return res.json({ savedSearch: savedRows[0], runs })
+  } catch (err) {
+    console.error('[savedSearch] results error:', err)
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// GET /seed-founders/saved-searches/:id/results/:runId
+router.get('/saved-searches/:id/results/:runId', async (req, res) => {
+  try {
+    await ensureSavedSearchTables()
+    const { id, runId } = req.params
+    const rows = await sql`
+      SELECT * FROM seed_saved_search_results
+      WHERE id = ${runId} AND saved_search_id = ${id}
+      LIMIT 1
+    `
+    if (!rows[0]) return res.status(404).json({ error: 'Run not found' })
+    return res.json({ run: rows[0] })
+  } catch (err) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// POST /seed-founders/saved-searches/:id/run  (manual trigger)
+router.post('/saved-searches/:id/run', async (req, res) => {
+  try {
+    if (!EXA_API_KEY) throw new Error('EXA_API_KEY not configured')
+    await ensureSavedSearchTables()
+    const result = await runSavedSearch(req.params.id)
+    return res.json({ ok: true, ...result })
+  } catch (err) {
+    console.error('[savedSearch] manual run error:', err)
     return res.status(500).json({ error: sanitizeErrorMessage(err) })
   }
 })
