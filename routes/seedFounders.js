@@ -952,6 +952,22 @@ router.get('/saved-searches', async (req, res) => {
   }
 })
 
+// PATCH /seed-founders/saved-searches/:id
+router.patch('/saved-searches/:id', async (req, res) => {
+  try {
+    await ensureSavedSearchTables()
+    const { name } = req.body || {}
+    if (!name?.trim()) return res.status(400).json({ error: 'name is required' })
+    const rows = await sql`
+      UPDATE seed_saved_searches SET name = ${name.trim()} WHERE id = ${req.params.id} RETURNING *
+    `
+    if (!rows[0]) return res.status(404).json({ error: 'Not found' })
+    return res.json(rows[0])
+  } catch (err) {
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
 // DELETE /seed-founders/saved-searches/:id
 router.delete('/saved-searches/:id', async (req, res) => {
   try {
