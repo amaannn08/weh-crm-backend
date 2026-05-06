@@ -1020,16 +1020,124 @@ router.get('/saved-searches/:id/results/:runId', async (req, res) => {
   }
 })
 
-// POST /seed-founders/saved-searches/:id/run  (manual trigger)
+// POST /seed-founders/saved-searches/:id/runs  (store results from a frontend search directly)
+router.post('/saved-searches/:id/runs', async (req, res) => {
+  try {
+    await ensureSavedSearchTables()
+    const { id } = req.params
+    const { results = [], runId = null } = req.body || {}
+
+    const savedRows = await sql`SELECT id FROM seed_saved_searches WHERE id = ${id} LIMIT 1`
+    if (!savedRows[0]) return res.status(404).json({ error: 'Saved search not found' })
+
+    let row
+    if (runId) {
+      // Update existing run in-place
+      const updated = await sql`
+        UPDATE seed_saved_search_results
+        SET results_json = ${JSON.stringify(results)}::jsonb, results_count = ${results.length}
+        WHERE id = ${runId} AND saved_search_id = ${id}
+        RETURNING id, run_at, results_count
+      `
+      row = updated[0]
+    }
+
+    if (!row) {
+      // Insert new run
+      const inserted = await sql`
+        INSERT INTO seed_saved_search_results (saved_search_id, results_json, results_count)
+        VALUES (${id}, ${JSON.stringify(results)}::jsonb, ${results.length})
+        RETURNING id, run_at, results_count
+      `
+      row = inserted[0]
+    }
+
+    await sql`
+      UPDATE seed_saved_searches
+      SET last_run_at = now(),
+          next_run_at = ${new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()}
+      WHERE id = ${id}
+    `
+    return res.status(201).json(row)
+  } catch (err) {
+    console.error('[savedSearch] store run error:', err)
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// POST /seed-founders/saved-searches/:id/run  (manual trigger with SSE streaming)
 router.post('/saved-searches/:id/run', async (req, res) => {
+  let activeWebsetId = null
   try {
     if (!EXA_API_KEY) throw new Error('EXA_API_KEY not configured')
     await ensureSavedSearchTables()
-    const result = await runSavedSearch(req.params.id)
-    return res.json({ ok: true, ...result })
+    
+    const rows = await sql`SELECT * FROM seed_saved_searches WHERE id = ${req.params.id} LIMIT 1`
+    const saved = rows[0]
+    if (!saved) return res.status(404).json({ error: 'Saved search not found' })
+
+    const params = saved.params_json || {}
+    const count = Math.min(params.count || 25, 100)
+    const query = buildQuery(params)
+    const criteria = buildCriteria(params)
+
+    console.log(`[savedSearch] running "${saved.name}" (id=${req.params.id})`)
+
+    // Start SSE streaming
+    res.writeHead(200, SSE_HEADERS)
+    res.flushHeaders?.()
+
+    const websetId = await createWebset(query, criteria, count)
+    activeWebsetId = websetId
+    canceledWebsets.delete(websetId)
+    
+    emitSse(res, 'ready', {
+      websetId,
+      message: `Running "${saved.name}"...`
+    })
+
+    const results = await streamWebsetWithAdaptivePolling(
+      websetId,
+      params,
+      (event, payload) => {
+        emitSse(res, event, payload)
+      },
+      () => canceledWebsets.has(websetId)
+    )
+
+    const resultRow = await sql`
+      INSERT INTO seed_saved_search_results (saved_search_id, results_json, results_count)
+      VALUES (${req.params.id}, ${JSON.stringify(results)}::jsonb, ${results.length})
+      RETURNING id
+    `
+
+    const nextRun = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+    await sql`
+      UPDATE seed_saved_searches
+      SET last_run_at = now(), next_run_at = ${nextRun.toISOString()}
+      WHERE id = ${req.params.id}
+    `
+
+    console.log(`[savedSearch] done "${saved.name}" — ${results.length} results`)
+    
+    emitSse(res, 'done', {
+      success: true,
+      resultId: resultRow[0]?.id,
+      count: results.length,
+      message: `Found ${results.length} results`
+    })
+    
+    canceledWebsets.delete(websetId)
+    return res.end()
   } catch (err) {
     console.error('[savedSearch] manual run error:', err)
-    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+    const safeMessage = sanitizeErrorMessage(err)
+    if (!res.headersSent) {
+      return res.status(500).json({ error: safeMessage })
+    }
+    if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
+    emitSse(res, 'error', { success: false, message: safeMessage })
+    return res.end()
   }
 })
 
