@@ -1,5 +1,5 @@
 import express from 'express'
-import { sql } from '../db/neon.js'
+import { sql, query as dbQuery } from '../db/neon.js'
 
 const router = express.Router()
 
@@ -159,12 +159,277 @@ async function ensureSavedSearchTables() {
     CREATE TABLE IF NOT EXISTS seed_saved_search_results (
       id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       saved_search_id  UUID NOT NULL REFERENCES seed_saved_searches(id) ON DELETE CASCADE,
+      session_id       UUID,
       run_at           TIMESTAMPTZ DEFAULT now(),
       results_json     JSONB NOT NULL DEFAULT '[]',
       results_count    INTEGER DEFAULT 0
     )
   `
   await sql`CREATE INDEX IF NOT EXISTS idx_saved_search_results_search_id ON seed_saved_search_results(saved_search_id)`
+  await sql`ALTER TABLE seed_saved_search_results ADD COLUMN IF NOT EXISTS session_id UUID`
+}
+
+// ─── New staging tables ──────────────────────────────────────────────────────
+
+async function ensureSeedSessionsTable() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS seed_sessions (
+      id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name            TEXT,
+      source          TEXT NOT NULL DEFAULT 'adhoc',
+      saved_search_id UUID,
+      params_json     JSONB,
+      status          TEXT DEFAULT 'running',
+      results_count   INTEGER DEFAULT 0,
+      webset_id       TEXT,
+      error_message   TEXT,
+      created_at      TIMESTAMPTZ DEFAULT now(),
+      completed_at    TIMESTAMPTZ
+    )
+  `
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS name TEXT`
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'adhoc'`
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS saved_search_id UUID`
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS params_json JSONB`
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'running'`
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS results_count INTEGER DEFAULT 0`
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS webset_id TEXT`
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS error_message TEXT`
+  await sql`ALTER TABLE seed_sessions ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ`
+  await sql`CREATE INDEX IF NOT EXISTS idx_seed_sessions_source ON seed_sessions(source)`
+  await sql`CREATE INDEX IF NOT EXISTS idx_seed_sessions_created_at ON seed_sessions(created_at DESC)`
+}
+
+async function ensureSeedSessionFoundersTable() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS seed_session_founders (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      session_id    UUID NOT NULL,
+      name          TEXT,
+      linkedin_id   TEXT,
+      linkedin_url  TEXT,
+      title         TEXT,
+      company_name  TEXT,
+      sector        TEXT,
+      background    TEXT,
+      location      TEXT,
+      stage         TEXT,
+      founded_year  TEXT,
+      summary       TEXT,
+      icp_score     NUMERIC(5,1) DEFAULT 0,
+      created_at    TIMESTAMPTZ DEFAULT now()
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS idx_session_founders_session_id ON seed_session_founders(session_id)`
+  await sql`CREATE INDEX IF NOT EXISTS idx_session_founders_linkedin_id ON seed_session_founders(linkedin_id) WHERE linkedin_id IS NOT NULL`
+}
+
+async function createSession({ name, source, savedSearchId, params, websetId }) {
+  await ensureSeedSessionsTable()
+  const rows = await sql`
+    INSERT INTO seed_sessions (name, source, saved_search_id, params_json, webset_id, status)
+    VALUES (
+      ${name || null},
+      ${source || 'adhoc'},
+      ${savedSearchId || null},
+      ${JSON.stringify(params || {})}::jsonb,
+      ${websetId || null},
+      'running'
+    )
+    RETURNING id
+  `
+  return rows[0]?.id
+}
+
+async function updateSession(id, updates = {}) {
+  if (!id) return
+  const { websetId, status, resultsCount, errorMessage, completed } = updates
+  await sql`
+    UPDATE seed_sessions SET
+      webset_id     = COALESCE(${websetId ?? null}, webset_id),
+      status        = COALESCE(${status ?? null}, status),
+      results_count = COALESCE(${resultsCount ?? null}, results_count),
+      error_message = COALESCE(${errorMessage ?? null}, error_message),
+      completed_at  = CASE WHEN ${completed ?? false} THEN now() ELSE completed_at END
+    WHERE id = ${id}
+  `
+}
+
+async function bulkInsertSessionFounders(sessionId, rows) {
+  if (!rows.length) return
+  await ensureSeedSessionFoundersTable()
+  // Insert in chunks of 50 to avoid huge queries
+  const CHUNK = 50
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK)
+    for (const row of chunk) {
+      try {
+        await sql`
+          INSERT INTO seed_session_founders
+            (session_id, name, linkedin_id, linkedin_url, title, company_name,
+             sector, background, location, stage, founded_year, summary, icp_score)
+          VALUES (
+            ${sessionId}, ${row.name || null}, ${row.linkedin_id || null},
+            ${row.linkedin_url || null}, ${row.title || null}, ${row.company_name || null},
+            ${row.sector || null}, ${row.background || null}, ${row.location || null},
+            ${row.stage || null}, ${row.founded_year || null}, ${row.summary || null},
+            ${row.icp_score ?? 0}
+          )
+        `
+      } catch (e) {
+        // Non-fatal — log and continue
+        console.warn('[sessionFounders] insert error:', e.message)
+      }
+    }
+  }
+}
+
+/**
+ * After dedup, remove the duplicate rows from seed_session_founders so the
+ * session view only shows net-new profiles.
+ * keepRows = the deduped result array (what we want to keep).
+ */
+async function pruneSessionFounders(sessionId, keepRows) {
+  if (!keepRows.length) {
+    // Nothing to keep — delete everything in this session
+    await sql`DELETE FROM seed_session_founders WHERE session_id = ${sessionId}`
+    return
+  }
+
+  const keepIds  = keepRows.map(r => r.linkedin_id).filter(Boolean)
+  const keepUrls = keepRows.map(r => r.linkedin_url).filter(Boolean)
+
+  // Delete rows from this session that are NOT in the keep set
+  // We identify "keep" rows by linkedin_id or linkedin_url
+  if (!keepIds.length && !keepUrls.length) {
+    // No identifiers to match — can't prune safely, keep everything
+    console.warn('[pruneSessionFounders] No linkedin_id or linkedin_url in keepRows, skipping prune')
+    return
+  }
+
+  let whereClause = ''
+  const params = [sessionId]
+
+  if (keepIds.length && keepUrls.length) {
+    // Keep rows that match EITHER linkedin_id OR linkedin_url
+    // Delete everything else
+    const idPlaceholders  = keepIds.map((_, i) => `$${i + 2}`).join(', ')
+    const urlPlaceholders = keepUrls.map((_, i) => `$${keepIds.length + i + 2}`).join(', ')
+    whereClause = `NOT (
+      (linkedin_id IS NOT NULL AND linkedin_id IN (${idPlaceholders})) OR
+      (linkedin_url IS NOT NULL AND linkedin_url IN (${urlPlaceholders}))
+    )`
+    params.push(...keepIds, ...keepUrls)
+  } else if (keepIds.length) {
+    // Only have linkedin_ids to match
+    const idPlaceholders = keepIds.map((_, i) => `$${i + 2}`).join(', ')
+    whereClause = `NOT (linkedin_id IS NOT NULL AND linkedin_id IN (${idPlaceholders}))`
+    params.push(...keepIds)
+  } else {
+    // Only have linkedin_urls to match
+    const urlPlaceholders = keepUrls.map((_, i) => `$${i + 2}`).join(', ')
+    whereClause = `NOT (linkedin_url IS NOT NULL AND linkedin_url IN (${urlPlaceholders}))`
+    params.push(...keepUrls)
+  }
+
+  const result = await dbQuery(
+    `DELETE FROM seed_session_founders WHERE session_id = $1 AND (${whereClause})`,
+    params
+  )
+  console.log(`[pruneSessionFounders] Deleted ${result.rowCount} duplicate rows from session ${sessionId}`)
+}
+
+/**
+ * Deduplicates a result set against:
+ *   1. seed_founders + seed_lps (already curated contacts — always excluded)
+ *   2. seed_session_founders from previous sessions of the same saved search
+ *      (cross-run dedup — only when savedSearchId is provided)
+ *
+ * Returns the filtered array of rows that are genuinely new.
+ */
+async function deduplicateResults(results, { savedSearchId = null, currentSessionId = null } = {}) {
+  if (!results.length) return results
+
+  const ids  = results.map(r => r.linkedin_id).filter(Boolean)
+  const urls = results.map(r => r.linkedin_url).filter(Boolean)
+
+  const seenIds  = new Set()
+  const seenUrls = new Set()
+
+  // Option 3: exclude anyone already in seed_founders or seed_lps
+  if (ids.length) {
+    const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ')
+    const { rows: founderIdRows } = await dbQuery(
+      `SELECT linkedin_id FROM seed_founders WHERE linkedin_id IN (${placeholders})
+       UNION
+       SELECT linkedin_id FROM seed_lps WHERE linkedin_id IN (${placeholders})`,
+      ids
+    )
+    founderIdRows.forEach(r => r.linkedin_id && seenIds.add(r.linkedin_id))
+  }
+  if (urls.length) {
+    const placeholders = urls.map((_, i) => `$${i + 1}`).join(', ')
+    const { rows: founderUrlRows } = await dbQuery(
+      `SELECT linkedin_url FROM seed_founders WHERE linkedin_url IS NOT NULL AND linkedin_url IN (${placeholders})
+       UNION
+       SELECT linkedin_url FROM seed_lps WHERE linkedin_url IS NOT NULL AND linkedin_url IN (${placeholders})`,
+      urls
+    )
+    founderUrlRows.forEach(r => r.linkedin_url && seenUrls.add(r.linkedin_url))
+  }
+
+  // Option 2: exclude anyone already seen in a previous session of the same saved search
+  if (savedSearchId) {
+    const sessionClause = currentSessionId ? `AND ss.id != $2` : ''
+
+    if (ids.length) {
+      const offset = currentSessionId ? 3 : 2
+      const placeholders = ids.map((_, i) => `$${i + offset}`).join(', ')
+      const params = currentSessionId
+        ? [savedSearchId, currentSessionId, ...ids]
+        : [savedSearchId, ...ids]
+      const { rows: prevIdRows } = await dbQuery(
+        `SELECT ssf.linkedin_id
+         FROM seed_session_founders ssf
+         JOIN seed_sessions ss ON ss.id = ssf.session_id
+         WHERE ss.saved_search_id = $1
+           ${sessionClause}
+           AND ssf.linkedin_id IN (${placeholders})`,
+        params
+      )
+      prevIdRows.forEach(r => r.linkedin_id && seenIds.add(r.linkedin_id))
+    }
+    if (urls.length) {
+      const offset = currentSessionId ? 3 : 2
+      const placeholders = urls.map((_, i) => `$${i + offset}`).join(', ')
+      const params = currentSessionId
+        ? [savedSearchId, currentSessionId, ...urls]
+        : [savedSearchId, ...urls]
+      const { rows: prevUrlRows } = await dbQuery(
+        `SELECT ssf.linkedin_url
+         FROM seed_session_founders ssf
+         JOIN seed_sessions ss ON ss.id = ssf.session_id
+         WHERE ss.saved_search_id = $1
+           ${sessionClause}
+           AND ssf.linkedin_url IS NOT NULL
+           AND ssf.linkedin_url IN (${placeholders})`,
+        params
+      )
+      prevUrlRows.forEach(r => r.linkedin_url && seenUrls.add(r.linkedin_url))
+    }
+  }
+
+  const filtered = results.filter(r =>
+    (!r.linkedin_id  || !seenIds.has(r.linkedin_id)) &&
+    (!r.linkedin_url || !seenUrls.has(r.linkedin_url))
+  )
+
+  const removed = results.length - filtered.length
+  if (removed > 0) {
+    console.log(`[dedup] removed ${removed} duplicate(s) from ${results.length} results`)
+  }
+
+  return filtered
 }
 
 async function createSearchLog({ query, params }) {
@@ -384,7 +649,7 @@ function dedupeKeyForItem(item) {
     || `${person.name || ''}:${person.position || ''}:${person.location || ''}`
 }
 
-async function streamWebsetWithAdaptivePolling(websetId, params, onEvent, shouldCancel) {
+async function streamWebsetWithAdaptivePolling(websetId, params, onEvent, shouldCancel, onNewBatch) {
   const start = Date.now()
   const seenKeys = new Set()
   const normalizedRows = []
@@ -439,6 +704,10 @@ async function streamWebsetWithAdaptivePolling(websetId, params, onEvent, should
         totalSoFar: normalizedRows.length,
         results: newlyFound
       })
+      // Non-blocking DB write for new batch rows
+      if (onNewBatch) {
+        onNewBatch(newlyFound).catch(e => console.warn('[poll] onNewBatch error:', e.message))
+      }
     }
 
     onEvent('progress', {
@@ -599,21 +868,29 @@ async function upsertLp(row) {
 router.post('/search', async (req, res) => {
   let activeWebsetId = null
   let searchLogId = null
+  let sessionId = null
   try {
     if (!EXA_API_KEY) throw new Error('EXA_API_KEY not configured')
 
     await ensureSeedFoundersTable()
     await ensureSeedSearchesTable()
+    await ensureSeedSessionsTable()
+    await ensureSeedSessionFoundersTable()
 
     const params = req.body
-    const shouldSave = params.save !== false  // default true, pass save:false for preview
-    const count = Math.min(params.count || 25, 100)
+    const count = Math.min(params.count || 50, 100)
     
     const query = buildQuery(params)
     const criteria = buildCriteria(params)
     searchLogId = await createSearchLog({ query, params })
 
-    console.log(`[seedFounders] webset search: "${query}" (n=${count}, save=${shouldSave})`)
+    // Build a human-readable session name from the query params
+    const sessionName = (params.query?.trim()) ||
+      [params.stage, ...(params.sectors || []), ...(params.backgrounds || []).slice(0, 2)]
+        .filter(Boolean).join(', ') ||
+      'Founder search'
+
+    console.log(`[seedFounders] webset search: "${query}" (n=${count})`)
 
     res.writeHead(200, SSE_HEADERS)
     res.flushHeaders?.()
@@ -622,8 +899,13 @@ router.post('/search', async (req, res) => {
     activeWebsetId = websetId
     await updateSearchLog(searchLogId, { websetId })
     canceledWebsets.delete(websetId)
+
+    // Create session record now that we have the webset ID
+    sessionId = await createSession({ name: sessionName, source: 'adhoc', params, websetId })
+
     emitSse(res, 'ready', {
       websetId,
+      sessionId,
       message: 'Webset created. Starting adaptive live updates...'
     })
 
@@ -635,49 +917,46 @@ router.post('/search', async (req, res) => {
         fields: ['source', 'websetId', 'batchCount', 'totalSoFar', 'results']
       },
       done: {
-        fields: ['success', 'added', 'duplicates', 'total', 'results', 'message']
+        fields: ['success', 'total', 'results', 'sessionId', 'message']
       }
     })
 
-    const results = await streamWebsetWithAdaptivePolling(
+    const rawResults = await streamWebsetWithAdaptivePolling(
       websetId,
       params,
       (event, payload) => {
         emitSse(res, event, payload)
       },
-      () => canceledWebsets.has(websetId)
+      () => canceledWebsets.has(websetId),
+      // onNewBatch: persist each batch to seed_session_founders as it arrives
+      (newRows) => bulkInsertSessionFounders(sessionId, newRows)
+    )
+
+    // Dedup against seed_founders + seed_lps (Option 3)
+    const results = await deduplicateResults(rawResults, { currentSessionId: sessionId })
+
+    // Remove duplicate rows from seed_session_founders so the session view is clean
+    await pruneSessionFounders(sessionId, results).catch(e =>
+      console.warn('[search] pruneSessionFounders error:', e.message)
     )
 
     if (!results.length) {
       await updateSearchLog(searchLogId, { status: 'completed', resultsCount: 0, completed: true })
-      emitSse(res, 'done', { success: false, message: 'No founders found. Try broader search.' })
+      await updateSession(sessionId, { status: 'completed', resultsCount: 0, completed: true })
+      emitSse(res, 'done', { success: false, sessionId, message: 'No new founders found. Try broader search.' })
       return res.end()
     }
 
-    let added = 0, duplicates = 0
-
-    for (const row of results) {
-      if (shouldSave) {
-        try {
-          const outcome = await upsertFounder(row)
-          if (outcome === 'added') added++; else duplicates++
-        } catch (e) {
-          if (e.code === '23505') duplicates++
-          else console.error('[seedFounders] insert error:', e.message)
-        }
-      }
-    }
+    await updateSearchLog(searchLogId, { status: 'completed', resultsCount: results.length, completed: true })
+    await updateSession(sessionId, { status: 'completed', resultsCount: results.length, completed: true })
 
     emitSse(res, 'done', {
-      success: true, added: shouldSave ? added : 0,
-      duplicates: shouldSave ? duplicates : 0,
+      success: true,
       total: results.length,
+      sessionId,
       results: results.sort((a, b) => b.icp_score - a.icp_score),
-      message: shouldSave
-        ? `Found ${results.length} founders — ${added} new, ${duplicates} duplicates`
-        : `Found ${results.length} founders`
+      message: `Found ${results.length} founders`
     })
-    await updateSearchLog(searchLogId, { status: 'completed', resultsCount: results.length, completed: true })
     canceledWebsets.delete(websetId)
     return res.end()
   } catch (err) {
@@ -689,11 +968,13 @@ router.post('/search', async (req, res) => {
     if (err.message === 'Seeding cancelled by user') {
       if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
       await updateSearchLog(searchLogId, { status: 'cancelled', completed: true })
-      emitSse(res, 'done', { success: false, cancelled: true, message: 'Seeding stopped by user' })
+      if (sessionId) await updateSession(sessionId, { status: 'cancelled', completed: true })
+      emitSse(res, 'done', { success: false, cancelled: true, sessionId, message: 'Seeding stopped by user' })
       return res.end()
     }
     if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
     await updateSearchLog(searchLogId, { status: 'failed', errorMessage: safeMessage, completed: true })
+    if (sessionId) await updateSession(sessionId, { status: 'failed', errorMessage: safeMessage, completed: true })
     emitSse(res, 'error', { success: false, message: safeMessage })
     return res.end()
   }
@@ -807,6 +1088,74 @@ router.post('/search/cancel', async (req, res) => {
   }
 })
 
+// ─── GET /seed-founders/sessions ────────────────────────────────────────────
+router.get('/sessions', async (req, res) => {
+  try {
+    await ensureSeedSessionsTable()
+    const { source, limit = 50, offset = 0 } = req.query
+    let rows
+    if (source && source !== 'all') {
+      rows = await sql`
+        SELECT * FROM seed_sessions
+        WHERE source = ${source}
+        ORDER BY created_at DESC
+        LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+      `
+    } else {
+      rows = await sql`
+        SELECT * FROM seed_sessions
+        ORDER BY created_at DESC
+        LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+      `
+    }
+    const safeRows = rows.map(r => ({
+      ...r,
+      error_message: r.error_message ? sanitizeErrorMessage(r.error_message) : r.error_message
+    }))
+    return res.json({ sessions: safeRows })
+  } catch (err) {
+    console.error('[sessions] list error:', err)
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// ─── GET /seed-founders/sessions/:sessionId/founders ────────────────────────
+router.get('/sessions/:sessionId/founders', async (req, res) => {
+  try {
+    await ensureSeedSessionsTable()
+    await ensureSeedSessionFoundersTable()
+    const { sessionId } = req.params
+    const { search, limit = 200, offset = 0 } = req.query
+
+    const sessionRows = await sql`SELECT * FROM seed_sessions WHERE id = ${sessionId} LIMIT 1`
+    if (!sessionRows[0]) return res.status(404).json({ error: 'Session not found' })
+
+    const q = search ? `%${search}%` : null
+    let founders
+    if (q) {
+      founders = await sql`
+        SELECT * FROM seed_session_founders
+        WHERE session_id = ${sessionId}
+          AND (name ILIKE ${q} OR company_name ILIKE ${q} OR title ILIKE ${q} OR location ILIKE ${q})
+        ORDER BY icp_score DESC, created_at DESC
+        LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+      `
+    } else {
+      founders = await sql`
+        SELECT * FROM seed_session_founders
+        WHERE session_id = ${sessionId}
+        ORDER BY icp_score DESC, created_at DESC
+        LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+      `
+    }
+
+    return res.json({ founders, session: sessionRows[0], total: founders.length })
+  } catch (err) {
+    console.error('[sessions] founders error:', err)
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
 // ─── GET /seed-founders ──────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
@@ -878,12 +1227,15 @@ router.delete('/lps/:id', async (req, res) => {
 
 export async function runSavedSearch(savedSearchId) {
   await ensureSavedSearchTables()
+  await ensureSeedSessionsTable()
+  await ensureSeedSessionFoundersTable()
+
   const rows = await sql`SELECT * FROM seed_saved_searches WHERE id = ${savedSearchId} LIMIT 1`
   const saved = rows[0]
   if (!saved) throw new Error('Saved search not found')
 
   const params = saved.params_json || {}
-  const count = Math.min(params.count || 25, 100)
+  const count = Math.min(params.count || 50, 100)
   const query = buildQuery(params)
   const criteria = buildCriteria(params)
 
@@ -892,13 +1244,33 @@ export async function runSavedSearch(savedSearchId) {
   const websetId = await createWebset(query, criteria, count)
   canceledWebsets.delete(websetId)
 
-  const results = await streamWebsetWithAdaptivePolling(
-    websetId, params, () => {}, () => false
+  const sessionId = await createSession({
+    name: saved.name,
+    source: 'saved_search',
+    savedSearchId,
+    params,
+    websetId
+  })
+
+  const rawResults = await streamWebsetWithAdaptivePolling(
+    websetId, params, () => {}, () => false,
+    (newRows) => bulkInsertSessionFounders(sessionId, newRows)
+  )
+
+  // Dedup: exclude already-saved contacts (Option 3) + previous runs of this saved search (Option 2)
+  const results = await deduplicateResults(rawResults, {
+    savedSearchId,
+    currentSessionId: sessionId
+  })
+
+  // Remove duplicate rows from seed_session_founders so the session view is clean
+  await pruneSessionFounders(sessionId, results).catch(e =>
+    console.warn('[savedSearch cron] pruneSessionFounders error:', e.message)
   )
 
   const resultRow = await sql`
-    INSERT INTO seed_saved_search_results (saved_search_id, results_json, results_count)
-    VALUES (${savedSearchId}, ${JSON.stringify(results)}::jsonb, ${results.length})
+    INSERT INTO seed_saved_search_results (saved_search_id, session_id, results_json, results_count)
+    VALUES (${savedSearchId}, ${sessionId}, ${JSON.stringify(results)}::jsonb, ${results.length})
     RETURNING id
   `
 
@@ -909,8 +1281,10 @@ export async function runSavedSearch(savedSearchId) {
     WHERE id = ${savedSearchId}
   `
 
+  await updateSession(sessionId, { status: 'completed', resultsCount: results.length, completed: true })
+
   console.log(`[savedSearch] done "${saved.name}" — ${results.length} results, next run ${nextRun.toISOString()}`)
-  return { resultId: resultRow[0]?.id, count: results.length }
+  return { resultId: resultRow[0]?.id, sessionId, count: results.length }
 }
 
 // POST /seed-founders/saved-searches
@@ -1068,16 +1442,19 @@ router.post('/saved-searches/:id/runs', async (req, res) => {
 // POST /seed-founders/saved-searches/:id/run  (manual trigger with SSE streaming)
 router.post('/saved-searches/:id/run', async (req, res) => {
   let activeWebsetId = null
+  let sessionId = null
   try {
     if (!EXA_API_KEY) throw new Error('EXA_API_KEY not configured')
     await ensureSavedSearchTables()
+    await ensureSeedSessionsTable()
+    await ensureSeedSessionFoundersTable()
     
     const rows = await sql`SELECT * FROM seed_saved_searches WHERE id = ${req.params.id} LIMIT 1`
     const saved = rows[0]
     if (!saved) return res.status(404).json({ error: 'Saved search not found' })
 
     const params = saved.params_json || {}
-    const count = Math.min(params.count || 25, 100)
+    const count = Math.min(params.count || 50, 100)
     const query = buildQuery(params)
     const criteria = buildCriteria(params)
 
@@ -1090,24 +1467,48 @@ router.post('/saved-searches/:id/run', async (req, res) => {
     const websetId = await createWebset(query, criteria, count)
     activeWebsetId = websetId
     canceledWebsets.delete(websetId)
+
+    // Create session for this run
+    sessionId = await createSession({
+      name: saved.name,
+      source: 'saved_search',
+      savedSearchId: req.params.id,
+      params,
+      websetId
+    })
     
     emitSse(res, 'ready', {
       websetId,
+      sessionId,
       message: `Running "${saved.name}"...`
     })
 
-    const results = await streamWebsetWithAdaptivePolling(
+    const rawResults = await streamWebsetWithAdaptivePolling(
       websetId,
       params,
       (event, payload) => {
         emitSse(res, event, payload)
       },
-      () => canceledWebsets.has(websetId)
+      () => canceledWebsets.has(websetId),
+      // onNewBatch: persist each batch to seed_session_founders as it arrives
+      (newRows) => bulkInsertSessionFounders(sessionId, newRows)
     )
 
+    // Dedup: exclude already-saved contacts (Option 3) + previous runs of this saved search (Option 2)
+    const results = await deduplicateResults(rawResults, {
+      savedSearchId: req.params.id,
+      currentSessionId: sessionId
+    })
+
+    // Remove duplicate rows from seed_session_founders so the session view is clean
+    await pruneSessionFounders(sessionId, results).catch(e =>
+      console.warn('[savedSearch] pruneSessionFounders error:', e.message)
+    )
+
+    // Store run snapshot (keep existing behaviour for backward compat)
     const resultRow = await sql`
-      INSERT INTO seed_saved_search_results (saved_search_id, results_json, results_count)
-      VALUES (${req.params.id}, ${JSON.stringify(results)}::jsonb, ${results.length})
+      INSERT INTO seed_saved_search_results (saved_search_id, session_id, results_json, results_count)
+      VALUES (${req.params.id}, ${sessionId}, ${JSON.stringify(results)}::jsonb, ${results.length})
       RETURNING id
     `
 
@@ -1118,11 +1519,14 @@ router.post('/saved-searches/:id/run', async (req, res) => {
       WHERE id = ${req.params.id}
     `
 
-    console.log(`[savedSearch] done "${saved.name}" — ${results.length} results`)
+    await updateSession(sessionId, { status: 'completed', resultsCount: results.length, completed: true })
+
+    console.log(`[savedSearch] done "${saved.name}" — ${results.length} results (after dedup)`)
     
     emitSse(res, 'done', {
       success: true,
       resultId: resultRow[0]?.id,
+      sessionId,
       count: results.length,
       message: `Found ${results.length} results`
     })
@@ -1136,6 +1540,7 @@ router.post('/saved-searches/:id/run', async (req, res) => {
       return res.status(500).json({ error: safeMessage })
     }
     if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
+    if (sessionId) await updateSession(sessionId, { status: 'failed', errorMessage: safeMessage, completed: true }).catch(() => {})
     emitSse(res, 'error', { success: false, message: safeMessage })
     return res.end()
   }
