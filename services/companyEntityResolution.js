@@ -1,6 +1,8 @@
 import { sql } from '../db/neon.js'
 import { callWithTools } from './llm.js'
 
+//made new changes
+
 function stripLegalSuffixes(name) {
   if (!name) return ''
   const suffixes = /\b(inc|incorporated|llc|ltd|limited|corp|corporation|co|company|gmbh|technologies|tech|labs|lab)\.?$/i
