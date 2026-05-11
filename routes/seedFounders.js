@@ -1022,16 +1022,43 @@ router.post('/search', async (req, res) => {
     if (!res.headersSent) {
       return res.status(500).json({ success: false, message: safeMessage })
     }
+
+    // Count how many rows actually landed in seed_session_founders so we
+    // preserve partial results metadata even for failed/cancelled runs.
+    let partialCount = 0
+    if (sessionId) {
+      try {
+        const countRows = await sql`SELECT COUNT(*)::int AS n FROM seed_session_founders WHERE session_id = ${sessionId}`
+        partialCount = countRows[0]?.n ?? 0
+      } catch (_) { /* non-fatal */ }
+    }
+    const partialProfilesSearched = partialCount > 0
+      ? estimateTotalProfilesSearched(partialCount, req.body || {})
+      : 0
+
     if (err.message === 'Seeding cancelled by user') {
       if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
-      await updateSearchLog(searchLogId, { status: 'cancelled', completed: true })
-      if (sessionId) await updateSession(sessionId, { status: 'cancelled', completed: true })
-      emitSse(res, 'done', { success: false, cancelled: true, sessionId, message: 'Seeding stopped by user' })
+      await updateSearchLog(searchLogId, { status: 'cancelled', resultsCount: partialCount, completed: true })
+      if (sessionId) await updateSession(sessionId, {
+        status: 'cancelled',
+        resultsCount: partialCount,
+        rawResultsCount: partialCount,
+        totalProfilesSearched: partialProfilesSearched,
+        completed: true
+      })
+      emitSse(res, 'done', { success: false, cancelled: true, sessionId, total: partialCount, message: 'Seeding stopped by user' })
       return res.end()
     }
     if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
-    await updateSearchLog(searchLogId, { status: 'failed', errorMessage: safeMessage, completed: true })
-    if (sessionId) await updateSession(sessionId, { status: 'failed', errorMessage: safeMessage, completed: true })
+    await updateSearchLog(searchLogId, { status: 'failed', resultsCount: partialCount, errorMessage: safeMessage, completed: true })
+    if (sessionId) await updateSession(sessionId, {
+      status: 'failed',
+      resultsCount: partialCount,
+      rawResultsCount: partialCount,
+      totalProfilesSearched: partialProfilesSearched,
+      errorMessage: safeMessage,
+      completed: true
+    })
     emitSse(res, 'error', { success: false, message: safeMessage })
     return res.end()
   }
@@ -1172,6 +1199,23 @@ router.get('/sessions', async (req, res) => {
     return res.json({ sessions: safeRows })
   } catch (err) {
     console.error('[sessions] list error:', err)
+    return res.status(500).json({ error: sanitizeErrorMessage(err) })
+  }
+})
+
+// ─── DELETE /seed-founders/sessions/:sessionId ───────────────────────────────
+router.delete('/sessions/:sessionId', async (req, res) => {
+  try {
+    await ensureSeedSessionsTable()
+    await ensureSeedSessionFoundersTable()
+    const { sessionId } = req.params
+    // Delete session founders first (no CASCADE defined on the FK)
+    await sql`DELETE FROM seed_session_founders WHERE session_id = ${sessionId}`
+    const result = await sql`DELETE FROM seed_sessions WHERE id = ${sessionId} RETURNING id`
+    if (!result.length) return res.status(404).json({ error: 'Session not found' })
+    return res.json({ success: true, id: sessionId })
+  } catch (err) {
+    console.error('[sessions] delete error:', err)
     return res.status(500).json({ error: sanitizeErrorMessage(err) })
   }
 })
@@ -1608,8 +1652,35 @@ router.post('/saved-searches/:id/run', async (req, res) => {
       return res.status(500).json({ error: safeMessage })
     }
     if (activeWebsetId) canceledWebsets.delete(activeWebsetId)
-    if (sessionId) await updateSession(sessionId, { status: 'failed', errorMessage: safeMessage, completed: true }).catch(() => {})
-    emitSse(res, 'error', { success: false, message: safeMessage })
+
+    // Count how many rows actually landed so partial data is preserved
+    let partialCount = 0
+    if (sessionId) {
+      try {
+        const countRows = await sql`SELECT COUNT(*)::int AS n FROM seed_session_founders WHERE session_id = ${sessionId}`
+        partialCount = countRows[0]?.n ?? 0
+      } catch (_) { /* non-fatal */ }
+    }
+    const partialProfilesSearched = partialCount > 0
+      ? estimateTotalProfilesSearched(partialCount, {})
+      : 0
+
+    if (sessionId) {
+      await updateSession(sessionId, {
+        status: err.message === 'Seeding cancelled by user' ? 'cancelled' : 'failed',
+        resultsCount: partialCount,
+        rawResultsCount: partialCount,
+        totalProfilesSearched: partialProfilesSearched,
+        errorMessage: err.message === 'Seeding cancelled by user' ? null : safeMessage,
+        completed: true
+      }).catch(() => {})
+    }
+
+    if (err.message === 'Seeding cancelled by user') {
+      emitSse(res, 'done', { success: false, cancelled: true, sessionId, total: partialCount, message: 'Seeding stopped by user' })
+    } else {
+      emitSse(res, 'error', { success: false, message: safeMessage })
+    }
     return res.end()
   }
 })
