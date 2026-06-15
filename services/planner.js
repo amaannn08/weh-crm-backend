@@ -10,11 +10,12 @@ Irrelevant topics: anything else — coding help, general knowledge, server comm
 If the question is OFF-TOPIC, call NO tools. The downstream LLM will handle the refusal.
 
 Available tools:
-- meeting_search: searches meeting transcripts. Use whenever the user asks about a topic, conversation, or what was discussed.
+- meeting_search: searches the CONTENT of meeting transcripts. Use ONLY when the user asks what was DISCUSSED/SAID in a meeting, or wants to find a topic/company mentioned in transcripts (e.g. "what did we discuss with XYZ?", "find meetings about climate tech").
   - Always set "query" to the user's question.
   - If a SPECIFIC company is mentioned by name, also set "company" to that company name.
+  - DO NOT use for counting meetings by person or month — use list_all_deals for that.
 - deal_lookup_by_company: fetches structured CRM data for a SPECIFIC named company (score, stage, status, POC, sector, risks, etc). Use when the user asks about a specific company's details.
-- list_all_deals: fetches all deals (optionally filtered by status and year). Use for broad pipeline questions like "what companies are in portfolio?", "how many active deals?", "how many deals in 2026?", "show all deals", "what's the average score?". Use this tool specifically when the user asks to count deals.
+- list_all_deals: fetches all deals (optionally filtered by status, year, POC, sector, company, and month). Use for broad pipeline questions like "what companies are in portfolio?", "how many active deals?", "how many deals in 2026?", "show all deals", "what's the average score?". Use this tool specifically when the user asks to count deals, or asks about a specific POC's activity, or sector-level deal stats.
 - sheet_query: queries the WEH Ventures Google Sheet. ALWAYS set "tab" explicitly. Can be called multiple times for cross-tab questions.
 
   Sheet tab schemas (exact columns):
@@ -51,9 +52,22 @@ Rules:
 - For sheet-specific questions (inbound/outbound contacts, referrals, explicit "in the sheet"): call sheet_query with the correct tab.
   - If user asks about multiple tabs (e.g. "compare inbound vs outbound"): call sheet_query TWICE with different tabs.
   - Always set filterMonth/filterYear if the question implies a time range.
+- For POC activity questions ("how many meetings did Rahul do", "what sector does Priya focus on most", "who is the most active POC", "and meetings?", "kitni meetings"):
+  call list_all_deals with filterPoc set to the person's name. Add filterMonth if a month is mentioned.
+  NEVER use meeting_search for these — meeting_search only searches transcript content, it has no POC or date filter.
+- For sector-level deal questions ("how many Fintech deals", "best AgriTech companies", "deals in SaaS"):
+  call list_all_deals with filterSector set to the sector name.
+- For company-specific questions in the CRM database: call deal_lookup_by_company.
 - If it's a simple conversational follow-up, evaluate if a new data type is requested. If the user asks about "companies" and then says "and deals?", YOU MUST CALL list_all_deals. Do not just rely on conversation history for new queries.
 - Only call no tools if absolutely no new data or database lookup is needed, OR if the question is off-topic/irrelevant.
-- Never call list_all_deals and deal_lookup_by_company for the same query.`
+- Never call list_all_deals and deal_lookup_by_company for the same query.
+
+CRITICAL FILTER RULE — when calling sheet_query for ANY count/total/number question:
+- You MUST pass filterMonth if the user mentions a specific month (e.g. "May", "March", "June").
+- You MUST pass filterYear if the user mentions a specific year (e.g. "2026", "2025").
+- Pass BOTH filterMonth + filterYear together if both are mentioned in the same question.
+- Failure to pass these = Python returns ALL rows, LLM sees only 50-row truncated sample = WRONG COUNT.
+- This rule applies to every sheet_query call, including cross-tab calls.`
 
 /**
  * Async LLM-based planner.

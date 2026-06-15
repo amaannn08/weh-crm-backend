@@ -302,7 +302,7 @@ async function pruneSessionFounders(sessionId, keepRows) {
     return
   }
 
-  const keepIds  = keepRows.map(r => r.linkedin_id).filter(Boolean)
+  const keepIds = keepRows.map(r => r.linkedin_id).filter(Boolean)
   const keepUrls = keepRows.map(r => r.linkedin_url).filter(Boolean)
 
   // Delete rows from this session that are NOT in the keep set
@@ -319,7 +319,7 @@ async function pruneSessionFounders(sessionId, keepRows) {
   if (keepIds.length && keepUrls.length) {
     // Keep rows that match EITHER linkedin_id OR linkedin_url
     // Delete everything else
-    const idPlaceholders  = keepIds.map((_, i) => `$${i + 2}`).join(', ')
+    const idPlaceholders = keepIds.map((_, i) => `$${i + 2}`).join(', ')
     const urlPlaceholders = keepUrls.map((_, i) => `$${keepIds.length + i + 2}`).join(', ')
     whereClause = `NOT (
       (linkedin_id IS NOT NULL AND linkedin_id IN (${idPlaceholders})) OR
@@ -356,31 +356,31 @@ async function pruneSessionFounders(sessionId, keepRows) {
  */
 function estimateTotalProfilesSearched(resultsCount, params = {}) {
   if (resultsCount === 0) return 0
-  
+
   // Base multiplier: how many profiles were searched per result
   let baseMultiplier = 8 // Default: 1 result per 8 profiles searched (12.5% success rate)
-  
+
   // Adjust based on search specificity
   const hasBackgrounds = params.backgrounds?.length > 0
   const hasSectors = params.sectors?.length > 0
   const hasLocation = params.location && params.location !== 'India' && params.location !== 'All India'
   const hasStage = params.stage && params.stage !== 'Any stage'
   const hasYear = params.year
-  
+
   // More specific = smaller pool (lower multiplier)
   if (hasBackgrounds) baseMultiplier -= 2
   if (hasSectors) baseMultiplier -= 1
   if (hasLocation) baseMultiplier -= 1
   if (hasStage) baseMultiplier -= 1
   if (hasYear) baseMultiplier -= 1
-  
+
   // Ensure minimum multiplier of 3 (33% success rate max)
   baseMultiplier = Math.max(baseMultiplier, 3)
-  
+
   // Add some randomness to make it feel real (±20%)
   const randomFactor = 0.8 + Math.random() * 0.4
   const estimated = Math.round(resultsCount * baseMultiplier * randomFactor)
-  
+
   // Round to nearest 5 or 10 to make it look more realistic
   if (estimated < 50) return Math.round(estimated / 5) * 5
   if (estimated < 200) return Math.round(estimated / 10) * 10
@@ -398,10 +398,10 @@ function estimateTotalProfilesSearched(resultsCount, params = {}) {
 async function deduplicateResults(results, { savedSearchId = null, currentSessionId = null } = {}) {
   if (!results.length) return results
 
-  const ids  = results.map(r => r.linkedin_id).filter(Boolean)
+  const ids = results.map(r => r.linkedin_id).filter(Boolean)
   const urls = results.map(r => r.linkedin_url).filter(Boolean)
 
-  const seenIds  = new Set()
+  const seenIds = new Set()
   const seenUrls = new Set()
 
   // Option 3: exclude anyone already in seed_founders or seed_lps
@@ -468,7 +468,7 @@ async function deduplicateResults(results, { savedSearchId = null, currentSessio
   }
 
   const filtered = results.filter(r =>
-    (!r.linkedin_id  || !seenIds.has(r.linkedin_id)) &&
+    (!r.linkedin_id || !seenIds.has(r.linkedin_id)) &&
     (!r.linkedin_url || !seenUrls.has(r.linkedin_url))
   )
 
@@ -559,7 +559,7 @@ function buildQuery(params) {
 
   if (params.stage) parts.push(params.stage)
   if (params.sectors?.length) parts.push(params.sectors.join(' or '))
-  
+
   if (!hasQuery) {
     parts.push('startup')
   }
@@ -569,7 +569,7 @@ function buildQuery(params) {
   if (params.backgrounds?.length) {
     parts.push('with background from ' + params.backgrounds.join(' or '))
   }
-  
+
   return parts.join(' ')
 }
 
@@ -613,7 +613,7 @@ function buildCriteria(params) {
 
 async function createWebset(query, criteria, count) {
   const searchPayload = { query, entity: { type: 'person' }, count }
-  
+
   // Only attach criteria if we have them, otherwise let Exa handle the query breakdown natively
   if (criteria && criteria.length > 0) {
     searchPayload.criteria = criteria
@@ -932,7 +932,7 @@ router.post('/search', async (req, res) => {
 
     const params = req.body
     const count = Math.min(params.count || 50, 100)
-    
+
     const query = buildQuery(params)
     const criteria = buildCriteria(params)
     searchLogId = await createSearchLog({ query, params })
@@ -1354,7 +1354,7 @@ export async function runSavedSearch(savedSearchId) {
   })
 
   const rawResults = await streamWebsetWithAdaptivePolling(
-    websetId, params, () => {}, () => false,
+    websetId, params, () => { }, () => false,
     (newRows) => bulkInsertSessionFounders(sessionId, newRows)
   )
 
@@ -1549,7 +1549,7 @@ router.post('/saved-searches/:id/run', async (req, res) => {
     await ensureSavedSearchTables()
     await ensureSeedSessionsTable()
     await ensureSeedSessionFoundersTable()
-    
+
     const rows = await sql`SELECT * FROM seed_saved_searches WHERE id = ${req.params.id} LIMIT 1`
     const saved = rows[0]
     if (!saved) return res.status(404).json({ error: 'Saved search not found' })
@@ -1577,7 +1577,7 @@ router.post('/saved-searches/:id/run', async (req, res) => {
       params,
       websetId
     })
-    
+
     emitSse(res, 'ready', {
       websetId,
       sessionId,
@@ -1623,17 +1623,17 @@ router.post('/saved-searches/:id/run', async (req, res) => {
 
     // Estimate total profiles searched for realistic metrics
     const totalProfilesSearched = estimateTotalProfilesSearched(results.length, params)
-    
-    await updateSession(sessionId, { 
-      status: 'completed', 
+
+    await updateSession(sessionId, {
+      status: 'completed',
       resultsCount: results.length,
       rawResultsCount: rawResults.length,
       totalProfilesSearched,
-      completed: true 
+      completed: true
     })
 
     console.log(`[savedSearch] done "${saved.name}" — ${results.length} results (after dedup), searched ~${totalProfilesSearched} profiles`)
-    
+
     emitSse(res, 'done', {
       success: true,
       resultId: resultRow[0]?.id,
@@ -1642,7 +1642,7 @@ router.post('/saved-searches/:id/run', async (req, res) => {
       totalSearched: totalProfilesSearched,
       message: `Found ${results.length} results from ${totalProfilesSearched} profiles`
     })
-    
+
     canceledWebsets.delete(websetId)
     return res.end()
   } catch (err) {
@@ -1673,7 +1673,7 @@ router.post('/saved-searches/:id/run', async (req, res) => {
         totalProfilesSearched: partialProfilesSearched,
         errorMessage: err.message === 'Seeding cancelled by user' ? null : safeMessage,
         completed: true
-      }).catch(() => {})
+      }).catch(() => { })
     }
 
     if (err.message === 'Seeding cancelled by user') {

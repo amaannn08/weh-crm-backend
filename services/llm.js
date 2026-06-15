@@ -7,7 +7,7 @@ export async function streamChat(messages, streamCallback) {
   const url = 'https://api.deepseek.com/chat/completions'
 
   const body = {
-    model: 'deepseek-chat',
+    model: 'deepseek-v4-flash',
     messages: messages.map((m) => ({
       role: m.role,
       content: m.content
@@ -60,7 +60,8 @@ export async function streamChat(messages, streamCallback) {
         try {
           const json = JSON.parse(data)
           const delta = json.choices?.[0]?.delta
-          const text = delta?.content || delta?.reasoning_content || ''
+          // Only stream actual answer content — never reasoning_content (chain-of-thought)
+          const text = delta?.content || ''
           if (text) {
             streamCallback(text)
           }
@@ -90,7 +91,7 @@ export async function callWithTools(messages, tools) {
   }))
 
   const body = {
-    model: 'deepseek-chat',
+    model: 'deepseek-v4-flash',
     messages,
     tools: toolDefs,
     tool_choice: 'auto',

@@ -296,9 +296,11 @@ def main():
             filter_year=args.filter_year,
             filter_keyword=args.filter_keyword,
         )
-        # Compute year breakdown from ALL filtered rows (before limit)
-        # This lets the LLM answer per-year count questions precisely
+        # Compute all breakdowns from ALL filtered rows (before limit)
+        # These give the LLM authoritative counts — no manual row-counting needed
         filtered_count = len(filtered)
+
+        # ── Year breakdown ──────────────────────────────────────────────────────
         year_field_candidates = ['__Timestamp_year', '__Date_year']
         year_breakdown = {}
         for r in filtered:
@@ -309,8 +311,50 @@ def main():
                     break
             if year is not None:
                 year_breakdown[str(year)] = year_breakdown.get(str(year), 0) + 1
-        # Sort by year ascending
         year_breakdown_sorted = dict(sorted(year_breakdown.items()))
+
+        # ── Month breakdown ─────────────────────────────────────────────────────
+        MONTH_NAMES = {
+            1: 'January', 2: 'February', 3: 'March', 4: 'April',
+            5: 'May', 6: 'June', 7: 'July', 8: 'August',
+            9: 'September', 10: 'October', 11: 'November', 12: 'December'
+        }
+        month_field_candidates = ['__Timestamp_month', '__Date_month']
+        month_breakdown_raw = {}
+        for r in filtered:
+            month = None
+            for field in month_field_candidates:
+                if field in r:
+                    month = r[field]
+                    break
+            if month is not None:
+                month_breakdown_raw[month] = month_breakdown_raw.get(month, 0) + 1
+        # Convert numeric month → named month, sorted Jan→Dec
+        month_breakdown = {
+            MONTH_NAMES[m]: cnt
+            for m, cnt in sorted(month_breakdown_raw.items())
+        }
+
+        # ── Industry breakdown ──────────────────────────────────────────────────
+        industry_breakdown = {}
+        for r in filtered:
+            industry = str(r.get('Industry') or r.get('Sector') or '').strip()
+            if industry:
+                industry_breakdown[industry] = industry_breakdown.get(industry, 0) + 1
+        industry_breakdown = dict(
+            sorted(industry_breakdown.items(), key=lambda x: -x[1])
+        )
+
+        # ── Logged-by / POC breakdown ───────────────────────────────────────────
+        # 'Logged By' on Sheet1/Outbound/Referrals; 'POC' on Team meetings
+        loggedby_breakdown = {}
+        for r in filtered:
+            person = str(r.get('Logged By') or r.get('POC') or '').strip()
+            if person:
+                loggedby_breakdown[person] = loggedby_breakdown.get(person, 0) + 1
+        loggedby_breakdown = dict(
+            sorted(loggedby_breakdown.items(), key=lambda x: -x[1])
+        )
 
         limited = filtered[:args.limit]
         clean = strip_internal(limited)
@@ -319,7 +363,10 @@ def main():
             'tab': args.tab,
             'total_rows': total_rows,
             'filtered_count': filtered_count,
-            'year_breakdown': year_breakdown_sorted,   # e.g. {"2023": 45, "2024": 67, "2026": 71}
+            'year_breakdown': year_breakdown_sorted,    # e.g. {"2024": 45, "2025": 67}
+            'month_breakdown': month_breakdown,          # e.g. {"May": 46, "June": 31}
+            'industry_breakdown': industry_breakdown,    # e.g. {"Fintech": 22, "SaaS": 11}
+            'loggedby_breakdown': loggedby_breakdown,    # e.g. {"Rahul": 40, "Priya": 30}
             'returned_count': len(clean),
             'columns': [h for h in headers if h],
             'rows': clean,

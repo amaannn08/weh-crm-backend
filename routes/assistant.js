@@ -34,6 +34,10 @@ Rules:
 - If the data does not contain the answer, say so clearly.
 - Be concise and directly answer the user's latest question.
 - When presenting pipeline or sheet data, format it clearly (lists, tables in markdown).
+- VC TERMINOLOGY: In this CRM, a "deal" means a startup company that was MET/EVALUATED (not a closed investment). So:
+  - Say "met X companies" or "evaluated X companies" or "had meetings with X companies" — NOT "completed X deals" or "closed X deals" (those phrases imply portfolio investments were made).
+  - "POC" means the person from WEH Ventures who attended the meeting (e.g. "Ayush led X meetings" not "Ayush completed X deals").
+  - "Portfolio" or "Active Diligence" status = still evaluating. Only explicitly say an investment was made if the data says status is "Portfolio".
 - SCOPE RULE: If the user's question is NOT related to WEH Ventures' deals, pipeline, meetings, contacts, portfolio, or investment activities, do NOT answer it. Instead respond with exactly: "I can only help with questions about WEH Ventures' deals, pipeline, meetings, and contacts. Please ask me something related to our investment activities."`
 
 // ─── SSE helpers ───────────────────────────────────────────────────────────────
@@ -59,8 +63,15 @@ function getToolLabel(toolId, input = {}) {
       return input.company
         ? `Looking up ${input.company} in CRM…`
         : 'Looking up company in CRM…'
-    case 'list_all_deals':
-      return 'Loading full deal pipeline…'
+    case 'list_all_deals': {
+      const parts = ['Loading deal pipeline']
+      if (input.filterPoc)     parts.push(`for ${input.filterPoc}`)
+      if (input.filterSector)  parts.push(`in ${input.filterSector}`)
+      if (input.filterCompany) parts.push(`for ${input.filterCompany}`)
+      if (input.filterMonth)   parts.push(input.filterMonth)
+      if (input.year)          parts.push(String(input.year))
+      return parts.join(' ') + '…'
+    }
     default:
       return `Running ${toolId}…`
   }
@@ -144,24 +155,51 @@ router.post('/chat', async (req, res) => {
         }
 
         if (tool.id === 'list_all_deals') {
+          // Build filter label so LLM knows exactly what scope the numbers cover
+          const f = result.filters || {}
+          const labelParts = []
+          if (result.status && result.status !== 'all') labelParts.push(`status: ${result.status}`)
+          if (result.year   && result.year   !== 'all') labelParts.push(`year: ${result.year}`)
+          if (f.filterPoc)     labelParts.push(`POC: ${f.filterPoc}`)
+          if (f.filterMonth)   labelParts.push(`month: ${f.filterMonth}`)
+          if (f.filterSector)  labelParts.push(`sector: ${f.filterSector}`)
+          if (f.filterCompany) labelParts.push(`company: ${f.filterCompany}`)
+          const scopeLabel = labelParts.length > 0 ? labelParts.join(', ') : 'all deals, all time'
+
           if (result?.total_deals !== undefined) {
-             const filterLabel = result.status && result.status !== 'all' ? `Status filter: ${result.status}` : 'All deals'
-             const yearLabel = result.year && result.year !== 'all' ? `Year: ${result.year}` : 'All time'
-             pipelineDataSection = `PIPELINE DATA (${filterLabel}, ${yearLabel}):\n\nTotal count of deals matching criteria: ${result.total_deals}\n\n`
+            pipelineDataSection =
+              `PIPELINE DATA (${scopeLabel}):\n\n` +
+              `Total deals matching these filters: ${result.total_deals}\n\n`
           } else if (result?.deals) {
-            const filterLabel = result.status && result.status !== 'all'
-              ? `Status filter: ${result.status}`
-              : 'All deals'
             const lines = result.deals.map((d) => {
               const parts = []
-              if (d.company)               parts.push(d.company)
-              if (d.status)                parts.push(`[${d.status}]`)
-              if (d.sector)                parts.push(`sector: ${d.sector}`)
+              if (d.company)                   parts.push(d.company)
+              if (d.status)                    parts.push(`[${d.status}]`)
+              if (d.sector)                    parts.push(`sector: ${d.sector}`)
               if (d.founder_final_score != null) parts.push(`score: ${d.founder_final_score}`)
-              if (d.poc)                   parts.push(`POC: ${d.poc}`)
+              if (d.poc)                       parts.push(`POC: ${d.poc}`)
+              if (d.meeting_date)              parts.push(`date: ${new Date(d.meeting_date).toDateString()}`)
               return `- ${parts.join(' | ')}`
             })
-            pipelineDataSection = `PIPELINE DATA (${filterLabel} — ${result.deals.length} deals):\n\n${lines.join('\n')}\n\n`
+
+            pipelineDataSection =
+              `PIPELINE DATA (${scopeLabel} — ${result.deals.length} deals):\n\n` +
+              lines.join('\n') + '\n'
+
+            // Surface breakdowns so LLM can answer distribution questions without counting rows
+            if (result.poc_breakdown && Object.keys(result.poc_breakdown).length > 0) {
+              const pocParts = Object.entries(result.poc_breakdown).map(([p, c]) => `${p}: ${c}`).join(', ')
+              pipelineDataSection += `\nDEALS BY POC: ${pocParts}\n`
+            }
+            if (result.sector_breakdown && Object.keys(result.sector_breakdown).length > 0) {
+              const secParts = Object.entries(result.sector_breakdown).map(([s, c]) => `${s}: ${c}`).join(', ')
+              pipelineDataSection += `DEALS BY SECTOR: ${secParts}\n`
+            }
+            if (result.sector_by_poc && Object.keys(result.sector_by_poc).length > 0) {
+              const sbpParts = Object.entries(result.sector_by_poc).map(([s, c]) => `${s}: ${c}`).join(', ')
+              pipelineDataSection += `${f.filterPoc?.toUpperCase()}'S SECTOR FOCUS: ${sbpParts}\n`
+            }
+            pipelineDataSection += '\n'
           }
         }
       }

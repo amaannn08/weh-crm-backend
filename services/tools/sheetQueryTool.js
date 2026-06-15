@@ -21,15 +21,15 @@ async function runPythonQuery({ tab, filterMonth, filterYear, filterKeyword, lim
   return new Promise((resolve, reject) => {
     const scriptPath = join(process.cwd(), 'scripts', 'sheet_query.py')
     const args = ['--tab', tab]
-    if (filterMonth)   args.push('--filter-month',   filterMonth)
-    if (filterYear)    args.push('--filter-year',    String(filterYear))
+    if (filterMonth) args.push('--filter-month', filterMonth)
+    if (filterYear) args.push('--filter-year', String(filterYear))
     if (filterKeyword) args.push('--filter-keyword', filterKeyword)
     args.push('--limit', String(limit))
 
     execFile('python3', [scriptPath, ...args], {
-      cwd:       process.cwd(),
-      env:       process.env,   // pass CLIENT_ID, CLIENT_SECRET, GOOGLE_TOKEN_PATH through
-      timeout:   30_000,
+      cwd: process.cwd(),
+      env: process.env,   // pass CLIENT_ID, CLIENT_SECRET, GOOGLE_TOKEN_PATH through
+      timeout: 30_000,
       maxBuffer: 10 * 1024 * 1024,
     }, (err, stdout, stderr) => {
       if (err) {
@@ -57,14 +57,18 @@ const TAB_SKIP_COLUMNS = {
 
 // Human-readable label per tab so the LLM understands what it's looking at
 const TAB_LABELS = {
-  'Sheet1':            'INBOUND CONTACTS LOG (Sheet1)',
+  'Sheet1': 'INBOUND CONTACTS LOG (Sheet1)',
   'Outbound Contacts': 'OUTBOUND CONTACTS LOG',
-  'Referrals':         'REFERRALS LOG',
-  'Team meetings':     'DEAL PIPELINE EVALUATIONS (Team meetings)',
+  'Referrals': 'REFERRALS LOG',
+  'Team meetings': 'DEAL PIPELINE EVALUATIONS (Team meetings)',
 }
 
 function formatRowsForLLM(result) {
-  const { tab, total_rows, filtered_count, year_breakdown, columns, rows } = result
+  const {
+    tab, total_rows, filtered_count,
+    year_breakdown, month_breakdown, industry_breakdown, loggedby_breakdown,
+    columns, rows
+  } = result
   const tabLabel = TAB_LABELS[tab] ?? tab
 
   if (!rows || rows.length === 0) {
@@ -74,7 +78,6 @@ function formatRowsForLLM(result) {
     )
   }
 
-  // Build a clear summary the LLM can use to answer count questions immediately
   const displayRows = rows.slice(0, MAX_ROWS_FOR_LLM)
   const truncated = rows.length > MAX_ROWS_FOR_LLM
 
@@ -83,17 +86,38 @@ function formatRowsForLLM(result) {
     `TOTAL ROWS IN TAB: ${total_rows}\n` +
     `ROWS MATCHING FILTERS: ${filtered_count}\n`
 
-  // Year breakdown — critical for "how many in March 2026?" type questions
+  // Year breakdown
   if (year_breakdown && Object.keys(year_breakdown).length > 0) {
-    const parts = Object.entries(year_breakdown)
-      .map(([yr, cnt]) => `${yr}: ${cnt}`)
-      .join(', ')
+    const parts = Object.entries(year_breakdown).map(([yr, cnt]) => `${yr}: ${cnt}`).join(', ')
     summary += `COUNT BY YEAR: ${parts}\n`
   }
 
-  summary += truncated
-    ? `SHOWING: first ${MAX_ROWS_FOR_LLM} of ${filtered_count} matched rows below\n`
-    : `SHOWING: all ${filtered_count} matched rows below\n`
+  // Month breakdown — authoritative count per month, no manual counting needed
+  if (month_breakdown && Object.keys(month_breakdown).length > 0) {
+    const parts = Object.entries(month_breakdown).map(([mo, cnt]) => `${mo}: ${cnt}`).join(', ')
+    summary += `COUNT BY MONTH: ${parts}\n`
+  }
+
+  // Industry breakdown
+  if (industry_breakdown && Object.keys(industry_breakdown).length > 0) {
+    const parts = Object.entries(industry_breakdown).map(([ind, cnt]) => `${ind}: ${cnt}`).join(', ')
+    summary += `INDUSTRY BREAKDOWN: ${parts}\n`
+  }
+
+  // Logged-by / POC breakdown
+  if (loggedby_breakdown && Object.keys(loggedby_breakdown).length > 0) {
+    const parts = Object.entries(loggedby_breakdown).map(([p, cnt]) => `${p}: ${cnt}`).join(', ')
+    summary += `LOGGED BY / POC: ${parts}\n`
+  }
+
+  if (truncated) {
+    summary +=
+      `SHOWING: first ${MAX_ROWS_FOR_LLM} of ${filtered_count} matched rows below\n` +
+      `⚠ WARNING: Only first ${MAX_ROWS_FOR_LLM} rows shown below. ` +
+      `For count/ranking/breakdown questions, use the aggregates ABOVE — do NOT count from the rows below.\n`
+  } else {
+    summary += `SHOWING: all ${filtered_count} matched rows below\n`
+  }
 
   const skipCols = TAB_SKIP_COLUMNS[tab] ?? new Set()
   const displayColumns = columns.filter(col => !skipCols.has(col))
@@ -172,8 +196,8 @@ export const sheetQueryTool = {
 
     console.log(
       `[sheetQueryTool] tab="${tab}"` +
-      (filterMonth   ? ` month="${filterMonth}"`   : '') +
-      (filterYear    ? ` year="${filterYear}"`    : '') +
+      (filterMonth ? ` month="${filterMonth}"` : '') +
+      (filterYear ? ` year="${filterYear}"` : '') +
       (filterKeyword ? ` keyword="${filterKeyword}"` : '')
     )
 

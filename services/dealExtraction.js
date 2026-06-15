@@ -4,7 +4,7 @@ if (!DEEPSEEK_API_KEY) {
   throw new Error('DEEPSEEK_API_KEY is required for deal extraction')
 }
 
-const MODEL_NAME = process.env.DEAL_EXTRACTION_MODEL || 'deepseek-chat'
+const MODEL_NAME = process.env.DEAL_EXTRACTION_MODEL || 'deepseek-v4-flash'
 const URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/chat/completions'
 
 function delay(ms) {
@@ -93,7 +93,13 @@ Return a single JSON object with EXACTLY this structure and key names:
   "founder_name": "",
   "meeting_date": "",          // ISO date YYYY-MM-DD or "" if unknown
   "poc": "",                   // who met them from the fund side
-  "sector": "",
+  "sector": "",                   // MUST be EXACTLY one of these canonical values (pick the closest):
+                                  //   Fintech, B2B SaaS, Consumer Tech, D2C / Consumer Brands,
+                                  //   Food & Beverage, AgriTech, HealthTech, EdTech,
+                                  //   CleanTech / Sustainability, AI / ML, Gaming,
+                                  //   E-commerce, Logistics / Supply Chain, Robotics,
+                                  //   Cybersecurity, Real Estate / PropTech,
+                                  //   Media / Content, Social Commerce, Other
   "business_model": "",
   "stage": "",
 
