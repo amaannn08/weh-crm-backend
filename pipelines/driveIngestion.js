@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { google } from 'googleapis'
 import { readFileSync, existsSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import mammoth from 'mammoth'
 import { sql, formatVector, initSchema } from '../db/neon.js'
 import { embed } from '../services/embeddings.js'
 import { extractDealFromTranscript } from '../services/dealExtraction.js'
@@ -20,6 +21,7 @@ import {
 } from '../services/dealIdentityResolution.js'
 
 const GOOGLE_DOCS_MIME = 'application/vnd.google-apps.document'
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Auth — prefers OAuth2 token file; falls back to service account
@@ -99,19 +101,35 @@ function streamToBuffer(stream) {
   })
 }
 
+function stripNullBytes(str) {
+  return str.replace(/\0/g, '')
+}
+
 async function getFileText(drive, fileId, mimeType) {
+  // Google Docs — export as plain text
   if (mimeType === GOOGLE_DOCS_MIME) {
     const res = await drive.files.export(
       { fileId, mimeType: 'text/plain' },
       { responseType: 'stream' }
     )
-    return (await streamToBuffer(res.data)).toString('utf8')
+    return stripNullBytes((await streamToBuffer(res.data)).toString('utf8'))
   }
+  // Binary .docx — use mammoth to extract readable text, avoids null-byte UTF-8 errors
+  if (mimeType === DOCX_MIME) {
+    const res = await drive.files.get(
+      { fileId, alt: 'media' },
+      { responseType: 'arraybuffer' }
+    )
+    const buffer = Buffer.from(res.data)
+    const { value: text } = await mammoth.extractRawText({ buffer })
+    return stripNullBytes(text)
+  }
+  // Fallback for other file types
   const res = await drive.files.get(
     { fileId, alt: 'media' },
     { responseType: 'stream' }
   )
-  return (await streamToBuffer(res.data)).toString('utf8')
+  return stripNullBytes((await streamToBuffer(res.data)).toString('utf8'))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,7 +184,6 @@ async function upsertDiscoveredFile(file) {
     ON CONFLICT (drive_file_id) DO UPDATE
     SET source_file_name = EXCLUDED.source_file_name
   `
-}
 }
 
 async function getTrackingStatus(driveFileId) {
