@@ -4,3 +4,4 @@ node_modules
 docs/
 google-token.json
 crm.pem
+ssh.md

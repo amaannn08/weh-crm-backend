@@ -163,7 +163,10 @@ async function upsertDiscoveredFile(file) {
       ${bootstrapStatus},
       ${existingMeeting?.ingested_at ?? null}
     )
+    ON CONFLICT (drive_file_id) DO UPDATE
+    SET source_file_name = EXCLUDED.source_file_name
   `
+}
 }
 
 async function getTrackingStatus(driveFileId) {
