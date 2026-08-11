@@ -165,8 +165,8 @@ router.post(
       `
       if (!existingMeeting[0]) {
         await sql`
-          INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding)
-          VALUES (${file.originalname}, ${file.originalname}, ${transcript}, ${vectorStr}::vector)
+          INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding, meeting_date)
+          VALUES (${file.originalname}, ${file.originalname}, ${transcript}, ${vectorStr}::vector, ${meetingDate}::date)
         `
       }
 
@@ -296,8 +296,8 @@ router.post(
         `
         if (!existingMeeting[0]) {
           await sql`
-            INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding)
-            VALUES (${file.originalname}, ${file.originalname}, ${transcript}, ${vectorStr}::vector)
+            INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding, meeting_date)
+            VALUES (${file.originalname}, ${file.originalname}, ${transcript}, ${vectorStr}::vector, ${meetingDate}::date)
           `
         }
 
@@ -392,8 +392,8 @@ router.post(
       const newDeal = dealRows[0]
 
       await sql`
-        INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding)
-        VALUES (${file.originalname}, ${file.originalname}, ${transcript}, ${vectorStr}::vector)
+        INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding, meeting_date)
+        VALUES (${file.originalname}, ${file.originalname}, ${transcript}, ${vectorStr}::vector, ${meetingDate}::date)
       `
 
       await sql`

@@ -328,8 +328,8 @@ async function ingestFile(drive, file) {
   const companyForMeeting = companyMissing ? null : (prioritizedCompany || null)
 
   const meetingRows = await sql`
-    INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding, company)
-    VALUES (${file.id}, ${file.name ?? null}, ${transcript}, ${vectorStr}::vector, ${companyForMeeting})
+    INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding, company, meeting_date)
+    VALUES (${file.id}, ${file.name ?? null}, ${transcript}, ${vectorStr}::vector, ${companyForMeeting}, ${meetingDate}::date)
     RETURNING id
   `
   const meetingId = meetingRows[0].id
