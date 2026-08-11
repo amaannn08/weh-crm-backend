@@ -19,10 +19,12 @@ router.get('/', async (_req, res) => {
         d.risks,
         d.pass_reasons,
         d.watch_reasons,
-        d.action_required
+        d.action_required,
+        d.meeting_date AS deal_meeting_date,
+        d.date AS deal_date
       FROM deal_meetings dm
       JOIN deals d ON dm.deal_id = d.id
-      ORDER BY d.created_at DESC
+      ORDER BY COALESCE(dm.meeting_date, d.meeting_date, d.date, d.created_at) DESC
     `
     res.json(rows)
   } catch (err) {
