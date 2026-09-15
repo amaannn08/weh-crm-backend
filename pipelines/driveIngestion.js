@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { google } from 'googleapis'
 import { readFileSync, existsSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { fileURLToPath } from 'url'
 import mammoth from 'mammoth'
 import { sql, formatVector, initSchema } from '../db/neon.js'
 import { embed } from '../services/embeddings.js'
@@ -28,17 +29,35 @@ const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingm
 // ─────────────────────────────────────────────────────────────────────────────
 
 function getDriveClient() {
+  const tokenEnv = process.env.GOOGLE_TOKEN_JSON
   const tokenPath = join(process.cwd(), process.env.GOOGLE_TOKEN_PATH || 'google-token.json')
+  const secretPath = '/etc/secrets/google-token.json'
   const credPath = process.env.GOOGLE_APPLICATION_CREDENTIALS
 
+  let tokens = null
+  let activeTokenPath = null
+
+  if (tokenEnv) {
+    try {
+      tokens = typeof tokenEnv === 'string' ? JSON.parse(tokenEnv) : tokenEnv
+    } catch (e) {
+      console.error('[driveIngest] Failed to parse GOOGLE_TOKEN_JSON env var:', e.message)
+    }
+  } else if (existsSync(tokenPath)) {
+    tokens = JSON.parse(readFileSync(tokenPath, 'utf8'))
+    activeTokenPath = tokenPath
+  } else if (existsSync(secretPath)) {
+    tokens = JSON.parse(readFileSync(secretPath, 'utf8'))
+    activeTokenPath = secretPath
+  }
+
   // OAuth2 path (CLIENT_ID + CLIENT_SECRET + saved token)
-  if (existsSync(tokenPath)) {
+  if (tokens) {
     const CLIENT_ID = process.env.CLIENT_ID
     const CLIENT_SECRET = process.env.CLIENT_SECRET
     if (!CLIENT_ID || !CLIENT_SECRET) {
       throw new Error('CLIENT_ID and CLIENT_SECRET must be set in .env to use OAuth2 token')
     }
-    const tokens = JSON.parse(readFileSync(tokenPath, 'utf8'))
     const oauth2Client = new google.auth.OAuth2(
       CLIENT_ID,
       CLIENT_SECRET,
@@ -46,11 +65,17 @@ function getDriveClient() {
     )
     oauth2Client.setCredentials(tokens)
 
-    // Auto-persist refreshed tokens so they don't expire
+    // Auto-persist refreshed tokens if a file path exists
     oauth2Client.on('tokens', (newTokens) => {
       const merged = { ...tokens, ...newTokens }
-      writeFileSync(tokenPath, JSON.stringify(merged, null, 2))
-      console.log('[driveIngest] OAuth2 tokens refreshed and saved')
+      if (activeTokenPath) {
+        try {
+          writeFileSync(activeTokenPath, JSON.stringify(merged, null, 2))
+          console.log('[driveIngest] OAuth2 tokens refreshed and saved')
+        } catch {
+          // ignore write errors on read-only secret mounts
+        }
+      }
     })
 
     return google.drive({ version: 'v3', auth: oauth2Client })
@@ -455,6 +480,13 @@ export async function runDriveIngest() {
   const drive = getDriveClient()
   const files = await listFilesInFolder(drive, folderId)
 
+  // Fetch all existing tracking rows in a single batch query for fast in-memory lookup
+  const existingTrackingRows = await sql`
+    SELECT drive_file_id, status, last_attempt_at, source_file_name
+    FROM drive_transcript_ingestion_status
+  `
+  const trackingMap = new Map(existingTrackingRows.map((r) => [r.drive_file_id, r]))
+
   let processed = 0
   let skipped = 0
   let errors = 0
@@ -466,9 +498,14 @@ export async function runDriveIngest() {
   let staleRecovered = 0
 
   for (const file of files) {
-    await upsertDiscoveredFile(file)
+    let tracking = trackingMap.get(file.id)
 
-    const tracking = await getTrackingStatus(file.id)
+    if (!tracking) {
+      await upsertDiscoveredFile(file)
+      tracking = await getTrackingStatus(file.id)
+      trackingMap.set(file.id, tracking)
+    }
+
     const staleProcessing = tracking.status === 'processing' && isStaleProcessing(tracking.last_attempt_at)
     if (staleProcessing) {
       staleRecovered++
@@ -512,4 +549,21 @@ export async function runDriveIngest() {
   }
   console.log('[driveIngest] Done:', summary)
   return summary
+}
+
+const isDirectCli = process.argv[1] && (
+  process.argv[1] === fileURLToPath(import.meta.url) ||
+  process.argv[1].endsWith('driveIngestion.js')
+)
+
+if (isDirectCli) {
+  runDriveIngest()
+    .then((summary) => {
+      console.log('[driveIngest] Finished successfully:', summary)
+      process.exit(0)
+    })
+    .catch((err) => {
+      console.error('[driveIngest] Fatal error:', err)
+      process.exit(1)
+    })
 }

@@ -20,6 +20,7 @@
     "merge:duplicates": "node scripts/mergeDuplicateDeals.js",
     "news:ingest": "node scripts/ingestNews.js",
     "news:reseed-sources": "node scripts/reseedNewsSources.js",
+    "cleanup:disk": "bash scripts/autoCleanupDisk.sh 75",
     "test": "node --test tests"
   },
   "keywords": [],

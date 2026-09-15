@@ -53,9 +53,7 @@ app.use('/seed-founders', authMiddleware, seedFoundersRoutes)
 app.use('/news', portfolioNewsRoutes)
 app.use('/companies', portfolioCompaniesRoutes)
 app.use('/newsletters', portfolioNewslettersRoutes)
-app.use('/admin', portfolioAdminRoutes)
-
-// Manual trigger: POST /admin/ingest/drive
+// Manual trigger: POST /admin/ingest/drive (must be before /admin router to avoid /ingest/:slug collision)
 app.post('/admin/ingest/drive', authMiddleware, async (_req, res) => {
   try {
     const result = await runDriveIngest()
@@ -65,6 +63,8 @@ app.post('/admin/ingest/drive', authMiddleware, async (_req, res) => {
     return res.status(500).json({ error: err.message || 'Drive ingest failed' })
   }
 })
+
+app.use('/admin', portfolioAdminRoutes)
 
 // Temp debug: GET /admin/sheet-test
 app.get('/admin/sheet-test', authMiddleware, async (_req, res) => {
