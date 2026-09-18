@@ -1,0 +1,43 @@
+# Render Blueprint Specification for WEH CRM Backend
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  # 1. Main Web Service
+  - type: web
+    name: weh-crm-backend
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: DRIVE_INGEST_CRON_ENABLED
+        value: "false" # Ingestion is managed by the isolated Cron Job below
+      - key: NEWS_INGEST_CRON_ENABLED
+        value: "true"
+      # Additional required environment variables should be set in Render dashboard:
+      # DATABASE_URL, GEMINI_API_KEY, DEEPSEEK_API_KEY, CLIENT_ID, CLIENT_SECRET,
+      # GOOGLE_DRIVE_FOLDER_ID, GOOGLE_TOKEN_JSON, JWT_SECRET, LOGIN_USERNAME, LOGIN_PASSWORD
+    secretFiles:
+      - key: google-token
+        mountPath: /etc/secrets/google-token.json
+
+  # 2. Render Native Cron Job (Isolated, reliable, non-sleeping execution)
+  - type: cron
+    name: weh-crm-drive-ingest
+    runtime: node
+    plan: starter
+    schedule: "0 */6 * * *"
+    buildCommand: npm install
+    startCommand: npm run ingest:drive
+    envVars:
+      - fromService:
+          name: weh-crm-backend
+          type: web
+    secretFiles:
+      - key: google-token
+        mountPath: /etc/secrets/google-token.json
