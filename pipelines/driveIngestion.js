@@ -4,8 +4,9 @@ import { readFileSync, existsSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import mammoth from 'mammoth'
-import { sql, formatVector, initSchema } from '../db/neon.js'
+import { sql, formatVector, initSchema, acquireLock, releaseLock } from '../db/neon.js'
 import { embed } from '../services/embeddings.js'
+import { cleanOrphanedTranscripts } from '../services/cleanup.js'
 import { extractDealFromTranscript } from '../services/dealExtraction.js'
 import { scoreAndSaveFounder, mergeScoresForCompanyIdentity } from '../services/founderScoring.js'
 import {
@@ -23,6 +24,9 @@ import {
 
 const GOOGLE_DOCS_MIME = 'application/vnd.google-apps.document'
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+const SHORTCUT_MIME = 'application/vnd.google-apps.shortcut'
+
+let isIngestRunning = false
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Auth — prefers OAuth2 token file; falls back to service account
@@ -107,7 +111,7 @@ async function listFilesInFolder(drive, folderId) {
   do {
     const { data } = await drive.files.list({
       q: `'${folderId}' in parents and trashed = false`,
-      fields: 'nextPageToken, files(id, name, mimeType)',
+      fields: 'nextPageToken, files(id, name, mimeType, shortcutDetails)',
       pageSize: 200,
       pageToken: nextPageToken || undefined
     })
@@ -130,19 +134,27 @@ function stripNullBytes(str) {
   return str.replace(/\0/g, '')
 }
 
-async function getFileText(drive, fileId, mimeType) {
+async function getFileText(drive, fileId, mimeType, shortcutDetails = null) {
+  let targetId = fileId
+  let targetMimeType = mimeType
+
+  if (mimeType === SHORTCUT_MIME && shortcutDetails?.targetId) {
+    targetId = shortcutDetails.targetId
+    targetMimeType = shortcutDetails.targetMimeType || GOOGLE_DOCS_MIME
+  }
+
   // Google Docs — export as plain text
-  if (mimeType === GOOGLE_DOCS_MIME) {
+  if (targetMimeType === GOOGLE_DOCS_MIME) {
     const res = await drive.files.export(
-      { fileId, mimeType: 'text/plain' },
+      { fileId: targetId, mimeType: 'text/plain' },
       { responseType: 'stream' }
     )
     return stripNullBytes((await streamToBuffer(res.data)).toString('utf8'))
   }
   // Binary .docx — use mammoth to extract readable text, avoids null-byte UTF-8 errors
-  if (mimeType === DOCX_MIME) {
+  if (targetMimeType === DOCX_MIME) {
     const res = await drive.files.get(
-      { fileId, alt: 'media' },
+      { fileId: targetId, alt: 'media' },
       { responseType: 'arraybuffer' }
     )
     const buffer = Buffer.from(res.data)
@@ -151,7 +163,7 @@ async function getFileText(drive, fileId, mimeType) {
   }
   // Fallback for other file types
   const res = await drive.files.get(
-    { fileId, alt: 'media' },
+    { fileId: targetId, alt: 'media' },
     { responseType: 'stream' }
   )
   return stripNullBytes((await streamToBuffer(res.data)).toString('utf8'))
@@ -310,7 +322,7 @@ async function ingestFile(drive, file) {
 
   let text
   try {
-    text = await getFileText(drive, file.id, file.mimeType || '')
+    text = await getFileText(drive, file.id, file.mimeType || '', file.shortcutDetails || null)
   } catch (e) {
     const errorMessage = `could not fetch text — ${toErrorMessage(e)}`
     console.warn(`${label}: ${errorMessage}`)
@@ -472,83 +484,140 @@ async function ingestFile(drive, file) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function runDriveIngest() {
-  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID
-  if (!folderId) throw new Error('GOOGLE_DRIVE_FOLDER_ID is required')
-
-  await initSchema()
-
-  const drive = getDriveClient()
-  const files = await listFilesInFolder(drive, folderId)
-
-  // Fetch all existing tracking rows in a single batch query for fast in-memory lookup
-  const existingTrackingRows = await sql`
-    SELECT drive_file_id, status, last_attempt_at, source_file_name
-    FROM drive_transcript_ingestion_status
-  `
-  const trackingMap = new Map(existingTrackingRows.map((r) => [r.drive_file_id, r]))
-
-  let processed = 0
-  let skipped = 0
-  let errors = 0
-  const skipReasons = {
-    success: 0,
-    processing: 0,
-    unsupported: 0
+  if (isIngestRunning) {
+    console.log('[driveIngest] Skipped: runDriveIngest is already executing in this process')
+    return { status: 'skipped', reason: 'concurrent_in_process_run' }
   }
-  let staleRecovered = 0
+  isIngestRunning = true
 
-  for (const file of files) {
-    let tracking = trackingMap.get(file.id)
+  const workerId = process.env.RENDER_INSTANCE_ID || `worker-${process.pid}-${Date.now()}`
+  let lockAcquired = false
 
-    if (!tracking) {
-      await upsertDiscoveredFile(file)
-      tracking = await getTrackingStatus(file.id)
-      trackingMap.set(file.id, tracking)
+  try {
+    const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID
+    if (!folderId) throw new Error('GOOGLE_DRIVE_FOLDER_ID is required')
+
+    await initSchema()
+
+    const lockRes = await acquireLock('drive_ingest', 30, workerId)
+    if (!lockRes.acquired) {
+      console.log(
+        '[driveIngest] Skipped: another ingest run holds active DB lease',
+        lockRes.currentLock
+      )
+      return {
+        status: 'skipped',
+        reason: 'concurrent_run_in_progress',
+        currentLock: lockRes.currentLock
+      }
     }
+    lockAcquired = true
 
-    const staleProcessing = tracking.status === 'processing' && isStaleProcessing(tracking.last_attempt_at)
-    if (staleProcessing) {
-      staleRecovered++
-      await markFailed(file, 'stale processing status recovered for retry')
+    const drive = getDriveClient()
+    const files = await listFilesInFolder(drive, folderId)
+
+    // Fetch all existing tracking rows in a single batch query for fast in-memory lookup
+    const existingTrackingRows = await sql`
+      SELECT drive_file_id, status, last_attempt_at, source_file_name
+      FROM drive_transcript_ingestion_status
+    `
+    const trackingMap = new Map(existingTrackingRows.map((r) => [r.drive_file_id, r]))
+
+    let processed = 0
+    let skipped = 0
+    let errors = 0
+    const skipReasons = {
+      success: 0,
+      processing: 0,
+      unsupported: 0
     }
+    let staleRecovered = 0
+    const shouldTrash = process.env.DRIVE_TRASH_PROCESSED_FILES === 'true'
 
-    const effectiveStatus = staleProcessing ? 'failed' : tracking.status
-    const shouldProcess = effectiveStatus === 'pending' || effectiveStatus === 'failed'
-    if (!shouldProcess) {
-      skipped++
-      if (effectiveStatus === 'success') skipReasons.success++
-      else if (effectiveStatus === 'processing') skipReasons.processing++
-      else skipReasons.unsupported++
-      continue
-    }
+    for (const file of files) {
+      let tracking = trackingMap.get(file.id)
 
-    try {
-      await markProcessing(file)
-      const result = await ingestFile(drive, file)
-      if (result.status === 'processed') {
-        await markSuccess(file, result.companyName)
-        processed++
-      } else {
-        await markFailed(file, result.error)
+      if (!tracking) {
+        await upsertDiscoveredFile(file)
+        tracking = await getTrackingStatus(file.id)
+        trackingMap.set(file.id, tracking)
+      }
+
+      const staleProcessing = tracking.status === 'processing' && isStaleProcessing(tracking.last_attempt_at)
+      if (staleProcessing) {
+        staleRecovered++
+        await markFailed(file, 'stale processing status recovered for retry')
+      }
+
+      const effectiveStatus = staleProcessing ? 'failed' : tracking.status
+      const shouldProcess = effectiveStatus === 'pending' || effectiveStatus === 'failed'
+      if (!shouldProcess) {
+        skipped++
+        if (effectiveStatus === 'success') skipReasons.success++
+        else if (effectiveStatus === 'processing') skipReasons.processing++
+        else skipReasons.unsupported++
+        continue
+      }
+
+      try {
+        await markProcessing(file)
+        const result = await ingestFile(drive, file)
+        if (result.status === 'processed') {
+          await markSuccess(file, result.companyName)
+          processed++
+
+          if (shouldTrash) {
+            try {
+              await drive.files.update({
+                fileId: file.id,
+                requestBody: { trashed: true }
+              })
+              console.log(`[driveIngest] Trashed processed Drive file: ${file.name} (${file.id})`)
+            } catch (trashErr) {
+              console.warn(
+                `[driveIngest] Could not trash Drive file "${file.name}": ${trashErr.message}. ` +
+                'Note: drive.readonly OAuth scope does not permit trashing.'
+              )
+            }
+          }
+        } else {
+          await markFailed(file, result.error)
+          errors++
+        }
+      } catch (e) {
+        console.error(`[driveIngest] Unexpected error for ${file.name}:`, e)
+        await markFailed(file, toErrorMessage(e))
         errors++
       }
-    } catch (e) {
-      console.error(`[driveIngest] Unexpected error for ${file.name}:`, e)
-      await markFailed(file, toErrorMessage(e))
-      errors++
     }
-  }
 
-  const summary = {
-    processed,
-    skipped,
-    errors,
-    total: files.length,
-    staleRecovered,
-    skipReasons
+    // Sweep orphaned temp transcript doc files
+    try {
+      cleanOrphanedTranscripts()
+    } catch (cleanErr) {
+      console.warn('[driveIngest] Post-ingest cleanup sweep warning:', cleanErr.message)
+    }
+
+    const summary = {
+      processed,
+      skipped,
+      errors,
+      total: files.length,
+      staleRecovered,
+      skipReasons
+    }
+    console.log('[driveIngest] Done:', summary)
+    return summary
+  } finally {
+    if (lockAcquired) {
+      try {
+        await releaseLock('drive_ingest', workerId)
+      } catch (err) {
+        console.warn('[driveIngest] Failed to release lock:', err.message)
+      }
+    }
+    isIngestRunning = false
   }
-  console.log('[driveIngest] Done:', summary)
-  return summary
 }
 
 const isDirectCli = process.argv[1] && (
