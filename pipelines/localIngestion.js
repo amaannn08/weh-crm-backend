@@ -4,6 +4,7 @@ import { join, isAbsolute } from 'path'
 import mammoth from 'mammoth'
 import { sql, formatVector, initSchema } from '../db/neon.js'
 import { embed } from '../services/embeddings.js'
+import { safeUnlink } from '../services/cleanup.js'
 
 const TRANSCRIPTS_DIR = process.env.TRANSCRIPTS_DIR
 const ALLOWED_EXT = ['.txt', '.md', '.docx']
@@ -87,6 +88,7 @@ async function ingest() {
       `
       processed++
       console.log(`Ingested: ${file.name}`)
+      safeUnlink(file.path, [TRANSCRIPTS_DIR])
     } catch (e) {
       console.warn(`Failed to embed/insert ${file.name}: ${e.message}`)
     }

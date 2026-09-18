@@ -27,6 +27,7 @@ import {
   evaluateDealIdentity,
   createDealIdentityAmbiguity
 } from '../services/dealIdentityResolution.js'
+import { safeUnlink } from '../services/cleanup.js'
 
 const DEAL_PATCH_FIELDS = [
   'company',
@@ -130,7 +131,7 @@ router.post(
     const file = req.file
     if (!file) return res.status(400).json({ error: 'No file uploaded' })
 
-    const cleanup = () => unlink(file.path, () => { })
+    const cleanup = () => safeUnlink(file.path, [transcriptUploadDir])
 
     try {
       // 1. Verify the deal exists
@@ -244,7 +245,7 @@ router.post(
     const file = req.file
     if (!file) return res.status(400).json({ error: 'No file uploaded' })
 
-    const cleanup = () => unlink(file.path, () => { })
+    const cleanup = () => safeUnlink(file.path, [transcriptUploadDir])
 
     try {
       // 1. Read text from docx

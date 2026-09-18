@@ -3,6 +3,7 @@ import { embed } from './embeddings.js'
 import { extractDealFromTranscript } from './dealExtraction.js'
 import { mergeScoresForCompanyIdentity, scoreAndSaveFounder } from './founderScoring.js'
 import { getDefaultDocsDir, listDocxFiles, readDocxFile } from './docxReader.js'
+import { safeUnlink } from './cleanup.js'
 import {
   deriveCompanyNameFromDomain,
   isCompanyNameMissing,
@@ -301,6 +302,7 @@ export async function ingestDocs({ limit, dryRun } = {}) {
       console.log(
         `Ingested meeting ${meetingId} into deal ${dealId} for file ${file.name}`
       )
+      safeUnlink(file.path, [docsDir])
     } catch (err) {
       console.error(`Failed to ingest ${file.name}:`, err)
       errors += 1
