@@ -143,30 +143,43 @@ async function getFileText(drive, fileId, mimeType, shortcutDetails = null) {
     targetMimeType = shortcutDetails.targetMimeType || GOOGLE_DOCS_MIME
   }
 
-  // Google Docs — export as plain text
-  if (targetMimeType === GOOGLE_DOCS_MIME) {
-    const res = await drive.files.export(
-      { fileId: targetId, mimeType: 'text/plain' },
+  try {
+    // Google Docs — export as plain text
+    if (targetMimeType === GOOGLE_DOCS_MIME) {
+      const res = await drive.files.export(
+        { fileId: targetId, mimeType: 'text/plain' },
+        { responseType: 'stream' }
+      )
+      return stripNullBytes((await streamToBuffer(res.data)).toString('utf8'))
+    }
+    // Binary .docx — use mammoth to extract readable text, avoids null-byte UTF-8 errors
+    if (targetMimeType === DOCX_MIME) {
+      const res = await drive.files.get(
+        { fileId: targetId, alt: 'media' },
+        { responseType: 'arraybuffer' }
+      )
+      const buffer = Buffer.from(res.data)
+      const { value: text } = await mammoth.extractRawText({ buffer })
+      return stripNullBytes(text)
+    }
+    // Fallback for other file types
+    const res = await drive.files.get(
+      { fileId: targetId, alt: 'media' },
       { responseType: 'stream' }
     )
     return stripNullBytes((await streamToBuffer(res.data)).toString('utf8'))
+  } catch (err) {
+    if (mimeType === SHORTCUT_MIME) {
+      const isNotFound = err?.code === 404 || err?.status === 404 || /not found/i.test(err?.message || '')
+      if (isNotFound) {
+        throw new Error(
+          `shortcut target document (${targetId}) not found or not shared with this Google account: ${toErrorMessage(err)}`
+        )
+      }
+      throw new Error(`failed to read shortcut target (${targetId}): ${toErrorMessage(err)}`)
+    }
+    throw err
   }
-  // Binary .docx — use mammoth to extract readable text, avoids null-byte UTF-8 errors
-  if (targetMimeType === DOCX_MIME) {
-    const res = await drive.files.get(
-      { fileId: targetId, alt: 'media' },
-      { responseType: 'arraybuffer' }
-    )
-    const buffer = Buffer.from(res.data)
-    const { value: text } = await mammoth.extractRawText({ buffer })
-    return stripNullBytes(text)
-  }
-  // Fallback for other file types
-  const res = await drive.files.get(
-    { fileId: targetId, alt: 'media' },
-    { responseType: 'stream' }
-  )
-  return stripNullBytes((await streamToBuffer(res.data)).toString('utf8'))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,6 +380,13 @@ async function ingestFile(drive, file) {
   const meetingRows = await sql`
     INSERT INTO meetings (drive_file_id, source_file_name, transcript, embedding, company, meeting_date)
     VALUES (${file.id}, ${file.name ?? null}, ${transcript}, ${vectorStr}::vector, ${companyForMeeting}, ${meetingDate}::date)
+    ON CONFLICT (drive_file_id) DO UPDATE
+    SET
+      source_file_name = EXCLUDED.source_file_name,
+      transcript = EXCLUDED.transcript,
+      embedding = EXCLUDED.embedding,
+      company = EXCLUDED.company,
+      meeting_date = EXCLUDED.meeting_date
     RETURNING id
   `
   const meetingId = meetingRows[0].id
@@ -483,7 +503,7 @@ async function ingestFile(drive, file) {
 // Exported entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function runDriveIngest() {
+export async function runDriveIngest(options = {}) {
   if (isIngestRunning) {
     console.log('[driveIngest] Skipped: runDriveIngest is already executing in this process')
     return { status: 'skipped', reason: 'concurrent_in_process_run' }
@@ -499,7 +519,34 @@ export async function runDriveIngest() {
 
     await initSchema()
 
-    const lockRes = await acquireLock('drive_ingest', 30, workerId)
+    const forceRequested =
+      Boolean(options?.force) ||
+      process.env.FORCE_INGEST_LOCK === 'true' ||
+      process.argv.includes('--force')
+
+    let lockRes = await acquireLock('drive_ingest', 30, workerId, forceRequested)
+    if (!lockRes.acquired) {
+      const lockHolder = lockRes.currentLock?.locked_by || ''
+      const pidMatch = lockHolder.match(/^worker-(\d+)-/)
+      if (pidMatch) {
+        const holderPid = Number(pidMatch[1])
+        let isDead = false
+        try {
+          process.kill(holderPid, 0)
+        } catch (err) {
+          if (err.code === 'ESRCH') {
+            isDead = true
+          }
+        }
+        if (isDead) {
+          console.warn(
+            `[driveIngest] Previous local worker ${lockHolder} (PID ${holderPid}) is dead. Reclaiming lease.`
+          )
+          lockRes = await acquireLock('drive_ingest', 30, workerId, true)
+        }
+      }
+    }
+
     if (!lockRes.acquired) {
       console.log(
         '[driveIngest] Skipped: another ingest run holds active DB lease',

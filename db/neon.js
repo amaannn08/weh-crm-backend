@@ -12,6 +12,11 @@ const pool = new pg.Pool({
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000
 })
+
+pool.on('error', (err) => {
+  // Prevent unhandled process crashes when Neon serverless proxy closes idle pool connections
+  console.warn('[db] Pool idle client error (handled):', err.message)
+})
 export function sql(strings, ...values) {
   let text = strings[0] ?? ''
   for (let i = 0; i < values.length; i += 1) {
@@ -529,7 +534,7 @@ export async function initSchema() {
  * Acquire an atomic database lease for distributed operations (e.g. drive ingestion).
  * Compatible with connection pooling (e.g. Neon PgBouncer transaction mode).
  */
-export async function acquireLock(lockKey, ttlMinutes = 30, workerId = null) {
+export async function acquireLock(lockKey, ttlMinutes = 30, workerId = null, force = false) {
   const wid = workerId || `${process.pid}-${Date.now()}`
   const client = await pool.connect()
   try {
@@ -542,6 +547,10 @@ export async function acquireLock(lockKey, ttlMinutes = 30, workerId = null) {
       )
     `)
 
+    const forceCondition = force
+      ? ''
+      : 'WHERE system_locks.expires_at < NOW() OR system_locks.locked_by = EXCLUDED.locked_by'
+
     const res = await client.query(
       `
       INSERT INTO system_locks (lock_key, locked_at, expires_at, locked_by)
@@ -551,7 +560,7 @@ export async function acquireLock(lockKey, ttlMinutes = 30, workerId = null) {
         locked_at = NOW(),
         expires_at = NOW() + ($2 || ' minutes')::interval,
         locked_by = EXCLUDED.locked_by
-      WHERE system_locks.expires_at < NOW() OR system_locks.locked_by = EXCLUDED.locked_by
+      ${forceCondition}
       RETURNING lock_key, locked_at, expires_at, locked_by
       `,
       [lockKey, String(ttlMinutes), wid]
@@ -584,6 +593,19 @@ export async function releaseLock(lockKey, workerId = null) {
       params.push(workerId)
     }
     const res = await client.query(q, params)
+    return { released: (res.rowCount ?? 0) > 0 }
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * Unconditionally release a system lock regardless of workerId.
+ */
+export async function forceReleaseLock(lockKey) {
+  const client = await pool.connect()
+  try {
+    const res = await client.query('UPDATE system_locks SET expires_at = NOW() WHERE lock_key = $1', [lockKey])
     return { released: (res.rowCount ?? 0) > 0 }
   } finally {
     client.release()
