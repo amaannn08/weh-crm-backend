@@ -594,12 +594,19 @@ export async function releaseLock(lockKey, workerId = null) {
  * Check active status of a system lock.
  */
 export async function getLockStatus(lockKey) {
-  const rows = await sql`
-    SELECT lock_key, locked_at, expires_at, locked_by,
-           (expires_at > NOW()) AS is_active
-    FROM system_locks
-    WHERE lock_key = ${lockKey}
-    LIMIT 1
-  `
-  return rows[0] || null
+  try {
+    const rows = await sql`
+      SELECT lock_key, locked_at, expires_at, locked_by,
+             (expires_at > NOW()) AS is_active
+      FROM system_locks
+      WHERE lock_key = ${lockKey}
+      LIMIT 1
+    `
+    return rows[0] || null
+  } catch (err) {
+    if (err?.code === '42P01') {
+      return null
+    }
+    throw err
+  }
 }

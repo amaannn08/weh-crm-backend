@@ -1,5 +1,5 @@
 import { existsSync, statSync, unlinkSync, readdirSync } from 'fs'
-import { resolve, relative, join } from 'path'
+import { resolve, relative, join, isAbsolute } from 'path'
 
 // Allowed directories where document/temp files may be safely deleted.
 // uploads/deal-files is explicitly EXCLUDED to protect active deal attachments.
@@ -20,8 +20,7 @@ export function isPathAllowedForCleanup(filePath, allowedDirs = ALLOWED_CLEANUP_
   return allowedDirs.some((dir) => {
     const resolvedDir = resolve(dir)
     const rel = relative(resolvedDir, target)
-    // Target is inside directory if relative path does not start with '..' and is not absolute
-    return rel && !rel.startsWith('..') && !resolve(rel).startsWith(resolvedDir) === false
+    return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
   })
 }
 
