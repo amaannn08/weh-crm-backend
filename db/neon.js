@@ -74,6 +74,15 @@ export async function initSchema() {
       'CREATE INDEX IF NOT EXISTS idx_drive_ingestion_status_updated_at ON drive_transcript_ingestion_status(updated_at DESC)'
     )
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS system_locks (
+        lock_key TEXT PRIMARY KEY,
+        locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        locked_by TEXT
+      )
+    `)
+
     // CRM meeting metadata per deal (1:1 with deals)
     await client.query(`
       CREATE TABLE IF NOT EXISTS deal_meetings (
@@ -514,4 +523,83 @@ export async function initSchema() {
   } finally {
     client.release()
   }
+}
+
+/**
+ * Acquire an atomic database lease for distributed operations (e.g. drive ingestion).
+ * Compatible with connection pooling (e.g. Neon PgBouncer transaction mode).
+ */
+export async function acquireLock(lockKey, ttlMinutes = 30, workerId = null) {
+  const wid = workerId || `${process.pid}-${Date.now()}`
+  const client = await pool.connect()
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS system_locks (
+        lock_key TEXT PRIMARY KEY,
+        locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        locked_by TEXT
+      )
+    `)
+
+    const res = await client.query(
+      `
+      INSERT INTO system_locks (lock_key, locked_at, expires_at, locked_by)
+      VALUES ($1, NOW(), NOW() + ($2 || ' minutes')::interval, $3)
+      ON CONFLICT (lock_key) DO UPDATE
+      SET
+        locked_at = NOW(),
+        expires_at = NOW() + ($2 || ' minutes')::interval,
+        locked_by = EXCLUDED.locked_by
+      WHERE system_locks.expires_at < NOW() OR system_locks.locked_by = EXCLUDED.locked_by
+      RETURNING lock_key, locked_at, expires_at, locked_by
+      `,
+      [lockKey, String(ttlMinutes), wid]
+    )
+
+    if (res.rows && res.rows.length > 0) {
+      return { acquired: true, workerId: wid, lock: res.rows[0] }
+    }
+
+    const existing = await client.query(
+      `SELECT lock_key, locked_at, expires_at, locked_by FROM system_locks WHERE lock_key = $1`,
+      [lockKey]
+    )
+    return { acquired: false, workerId: wid, currentLock: existing.rows[0] || null }
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * Release an atomic database lease.
+ */
+export async function releaseLock(lockKey, workerId = null) {
+  const client = await pool.connect()
+  try {
+    let q = 'UPDATE system_locks SET expires_at = NOW() WHERE lock_key = $1'
+    const params = [lockKey]
+    if (workerId) {
+      q += ' AND locked_by = $2'
+      params.push(workerId)
+    }
+    const res = await client.query(q, params)
+    return { released: (res.rowCount ?? 0) > 0 }
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * Check active status of a system lock.
+ */
+export async function getLockStatus(lockKey) {
+  const rows = await sql`
+    SELECT lock_key, locked_at, expires_at, locked_by,
+           (expires_at > NOW()) AS is_active
+    FROM system_locks
+    WHERE lock_key = ${lockKey}
+    LIMIT 1
+  `
+  return rows[0] || null
 }
