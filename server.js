@@ -16,13 +16,17 @@ import { authMiddleware } from './middleware/auth.js'
 import { initSchema } from './db/neon.js'
 import { runIngest } from './modules/portfolioNews/jobs/ingest.js'
 import { runDriveIngest } from './pipelines/driveIngestion.js'
+import { cleanOrphanedTranscripts } from './services/cleanup.js'
 import { sql } from './db/neon.js'
 
 const app = express()
 const PORT = process.env.PORT ?? 3000
 
 initSchema()
-  .then(() => console.log('Schema init: OK'))
+  .then(() => {
+    console.log('Schema init: OK')
+    cleanOrphanedTranscripts()
+  })
   .catch((err) => {
     console.error('Schema init error:', err)
   })
@@ -53,8 +57,20 @@ app.use('/seed-founders', authMiddleware, seedFoundersRoutes)
 app.use('/news', portfolioNewsRoutes)
 app.use('/companies', portfolioCompaniesRoutes)
 app.use('/newsletters', portfolioNewslettersRoutes)
+function adminOrCronAuth(req, res, next) {
+  const cronSecret = process.env.CRON_SECRET
+  const headerSecret = req.headers['x-cron-secret']
+  const authHeader = req.headers.authorization
+  const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null
+
+  if (cronSecret && (headerSecret === cronSecret || bearerToken === cronSecret)) {
+    return next()
+  }
+  return authMiddleware(req, res, next)
+}
+
 // Manual trigger: POST /admin/ingest/drive (must be before /admin router to avoid /ingest/:slug collision)
-app.post('/admin/ingest/drive', authMiddleware, async (_req, res) => {
+app.post('/admin/ingest/drive', adminOrCronAuth, async (_req, res) => {
   try {
     const result = await runDriveIngest()
     return res.json(result)
@@ -95,6 +111,7 @@ const driveIngestCron = process.env.DRIVE_INGEST_CRON || '0 */6 * * *'
 if (driveIngestEnabled) {
   if (cron.validate(driveIngestCron)) {
     cron.schedule(driveIngestCron, () => {
+      console.log(`[cron] Running scheduled Drive transcript ingest: ${new Date().toISOString()}`)
       runDriveIngest().catch((err) => console.error('[cron] Drive ingest error:', err))
     })
     console.log(`[cron] Drive transcript ingest scheduled: ${driveIngestCron}`)
@@ -102,8 +119,17 @@ if (driveIngestEnabled) {
     console.warn(`[cron] Invalid DRIVE_INGEST_CRON expression: "${driveIngestCron}" — cron disabled`)
   }
 } else {
-  console.log('[cron] Drive transcript ingest disabled (DRIVE_INGEST_CRON_ENABLED != "true")')
+  console.log('[cron] Drive transcript ingest disabled in web process (DRIVE_INGEST_CRON_ENABLED != "true")')
 }
+
+// Clean orphaned temp transcripts every 6 hours
+cron.schedule('30 */6 * * *', () => {
+  try {
+    cleanOrphanedTranscripts()
+  } catch (err) {
+    console.error('[cron] Temp transcripts cleanup error:', err.message)
+  }
+})
 
 // Weekly saved search cron — runs every Monday at 8am
 const savedSearchCron = process.env.SAVED_SEARCH_CRON || '0 8 * * 1'
