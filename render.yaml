@@ -21,7 +21,8 @@ services:
         value: "true"
       # Additional required environment variables should be set in Render dashboard:
       # DATABASE_URL, GEMINI_API_KEY, DEEPSEEK_API_KEY, CLIENT_ID, CLIENT_SECRET,
-      # GOOGLE_DRIVE_FOLDER_ID, GOOGLE_TOKEN_JSON, JWT_SECRET, LOGIN_USERNAME, LOGIN_PASSWORD
+      # GOOGLE_DRIVE_FOLDER_ID, GOOGLE_TOKEN_JSON, JWT_SECRET, LOGIN_USERNAME, LOGIN_PASSWORD,
+      # BLOB_READ_WRITE_TOKEN (Vercel Blob storage token for deal attachments)
     secretFiles:
       - key: google-token
         mountPath: /etc/secrets/google-token.json

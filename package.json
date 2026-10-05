@@ -31,6 +31,7 @@
   "dependencies": {
     "@google/genai": "^1.44.0",
     "@neondatabase/serverless": "^0.10.0",
+    "@vercel/blob": "^2.8.0",
     "axios": "^1.13.6",
     "cheerio": "^1.2.0",
     "dotenv": "^16.4.5",

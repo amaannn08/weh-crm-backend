@@ -28,6 +28,7 @@ import {
   createDealIdentityAmbiguity
 } from '../services/dealIdentityResolution.js'
 import { safeUnlink } from '../services/cleanup.js'
+import { uploadDealFile, deleteDealFile } from '../services/storage.js'
 
 const DEAL_PATCH_FIELDS = [
   'company',
@@ -65,32 +66,16 @@ const HARD_PATCH_FIELDS = [
 
 const router = express.Router()
 
-const uploadDir = join(process.cwd(), 'uploads', 'deal-files')
-mkdirSync(uploadDir, { recursive: true })
-
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, uploadDir),
-    filename: (_req, file, cb) => {
-      const timestamp = Date.now()
-      const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')
-      cb(null, `${timestamp}-${safeName}`)
-    }
-  })
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
 })
 
-// Separate multer instance for transcript uploads (temp dir, cleaned up after processing)
+// Separate multer instance for transcript uploads (memory storage, zero disk footprint)
 const transcriptUploadDir = join(process.cwd(), 'uploads', 'transcripts-tmp')
-mkdirSync(transcriptUploadDir, { recursive: true })
 const transcriptUpload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, transcriptUploadDir),
-    filename: (_req, file, cb) => {
-      const ts = Date.now()
-      const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')
-      cb(null, `${ts}-${safe}`)
-    }
-  }),
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (file.originalname.toLowerCase().endsWith('.docx')) cb(null, true)
     else cb(new Error('Only .docx files are supported'))
@@ -131,7 +116,9 @@ router.post(
     const file = req.file
     if (!file) return res.status(400).json({ error: 'No file uploaded' })
 
-    const cleanup = () => safeUnlink(file.path, [transcriptUploadDir])
+    const cleanup = () => {
+      if (file?.path) safeUnlink(file.path, [transcriptUploadDir])
+    }
 
     try {
       // 1. Verify the deal exists
@@ -143,7 +130,11 @@ router.post(
       }
 
       // 2. Read text from docx
-      const buffer = readFileSync(file.path)
+      const buffer = file.buffer || (file.path ? readFileSync(file.path) : null)
+      if (!buffer) {
+        cleanup()
+        return res.status(400).json({ error: 'Failed to read file buffer' })
+      }
       const { value: transcript } = await mammoth.extractRawText({ buffer })
       if (!transcript?.trim()) {
         cleanup()
@@ -245,11 +236,17 @@ router.post(
     const file = req.file
     if (!file) return res.status(400).json({ error: 'No file uploaded' })
 
-    const cleanup = () => safeUnlink(file.path, [transcriptUploadDir])
+    const cleanup = () => {
+      if (file?.path) safeUnlink(file.path, [transcriptUploadDir])
+    }
 
     try {
       // 1. Read text from docx
-      const buffer = readFileSync(file.path)
+      const buffer = file.buffer || (file.path ? readFileSync(file.path) : null)
+      if (!buffer) {
+        cleanup()
+        return res.status(400).json({ error: 'Failed to read file buffer' })
+      }
       const { value: transcript } = await mammoth.extractRawText({ buffer })
       if (!transcript?.trim()) {
         cleanup()
@@ -1297,7 +1294,7 @@ router.post('/:id/files', upload.array('files'), async (req, res) => {
     const inserted = []
     // eslint-disable-next-line no-restricted-syntax
     for (const f of files) {
-      const stored = basename(f.path)
+      const stored = await uploadDealFile(f)
       const rows = await sql`
         INSERT INTO deal_files (deal_id, file_name, stored_path, mime_type, size)
         VALUES (${id}, ${f.originalname}, ${stored}, ${f.mimetype ?? null}, ${f.size ?? null})
@@ -1341,12 +1338,7 @@ router.delete('/:dealId/files/:fileId', async (req, res) => {
     if (!file) {
       return res.status(404).json({ error: 'File not found' })
     }
-    const fullPath = join(uploadDir, file.stored_path)
-    unlink(fullPath, (err) => {
-      if (err && err.code !== 'ENOENT') {
-        console.warn('Failed to remove file from disk', err)
-      }
-    })
+    await deleteDealFile(file.stored_path)
     await sql`
       DELETE FROM deal_files WHERE id = ${fileId}
     `

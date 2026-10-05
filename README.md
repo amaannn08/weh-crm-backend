@@ -142,14 +142,15 @@ Upload:
 Behavior:
 
 - saves metadata into `deal_files`
-- currently stores files locally under `backend/uploads/deal-files`
-- server serves them via `GET /uploads/deal-files/*` (configured in `server.js`)
+- if `BLOB_READ_WRITE_TOKEN` is set, uploads directly to Vercel Blob cloud storage (public CDN link)
+- if not set (local dev), stores files under `backend/uploads/deal-files` (fallback)
+- server serves local legacy files via `GET /uploads/deal-files/*`
 
 ### File cleanup
 
 - `DELETE /deals/:dealId/files/:fileId` removes both:
   - the database row (`deal_files`)
-  - the corresponding local file in `uploads/deal-files/`
+  - the corresponding blob in Vercel Blob or local file in `uploads/deal-files/`
 
 ## Internal docs
 
