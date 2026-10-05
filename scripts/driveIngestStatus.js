@@ -58,7 +58,10 @@ function getDriveClient() {
   throw new Error('No Google Drive credentials found in GOOGLE_TOKEN_JSON, google-token.json, or /etc/secrets/')
 }
 
-async function listAllDriveFiles(drive, folderId) {
+async function listAllDriveFiles(drive, folderId, parentName = 'root', visited = new Set()) {
+  if (visited.has(folderId)) return []
+  visited.add(folderId)
+
   const files = []
   let pageToken = null
   do {
@@ -68,7 +71,21 @@ async function listAllDriveFiles(drive, folderId) {
       pageSize: 200,
       pageToken: pageToken || undefined
     })
-    files.push(...(res.data.files || []))
+    const items = res.data.files || []
+    for (const item of items) {
+      const isFolder = item.mimeType === 'application/vnd.google-apps.folder'
+      const isFolderShortcut = item.mimeType === 'application/vnd.google-apps.shortcut' && item.shortcutDetails?.targetMimeType === 'application/vnd.google-apps.folder'
+      if (isFolder || isFolderShortcut) {
+        const targetFolderId = isFolderShortcut ? item.shortcutDetails?.targetId : item.id
+        if (targetFolderId) {
+          const nested = await listAllDriveFiles(drive, targetFolderId, item.name, visited)
+          files.push(...nested)
+        }
+      } else {
+        item.parentFolderName = parentName
+        files.push(item)
+      }
+    }
     pageToken = res.data.nextPageToken || null
   } while (pageToken)
   return files

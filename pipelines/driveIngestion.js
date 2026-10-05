@@ -105,7 +105,12 @@ function getDriveClient() {
 // Drive helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function listFilesInFolder(drive, folderId) {
+const FOLDER_MIME = 'application/vnd.google-apps.folder'
+
+async function listFilesInFolder(drive, folderId, parentName = 'root', visited = new Set()) {
+  if (visited.has(folderId)) return []
+  visited.add(folderId)
+
   const allFiles = []
   let nextPageToken = null
   do {
@@ -115,7 +120,22 @@ async function listFilesInFolder(drive, folderId) {
       pageSize: 200,
       pageToken: nextPageToken || undefined
     })
-    allFiles.push(...(data.files || []))
+    const items = data.files || []
+    for (const item of items) {
+      const isFolder = item.mimeType === FOLDER_MIME
+      const isFolderShortcut = item.mimeType === SHORTCUT_MIME && item.shortcutDetails?.targetMimeType === FOLDER_MIME
+      if (isFolder || isFolderShortcut) {
+        const targetFolderId = isFolderShortcut ? item.shortcutDetails?.targetId : item.id
+        if (targetFolderId) {
+          console.log(`[driveIngest] Traversing subfolder: "${item.name}" (${targetFolderId})`)
+          const nestedFiles = await listFilesInFolder(drive, targetFolderId, item.name, visited)
+          allFiles.push(...nestedFiles)
+        }
+      } else {
+        item.parentFolderName = parentName
+        allFiles.push(item)
+      }
+    }
     nextPageToken = data.nextPageToken || null
   } while (nextPageToken)
   return allFiles

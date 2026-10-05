@@ -10,7 +10,7 @@ const pool = new pg.Pool({
   connectionString,
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000
+  connectionTimeoutMillis: 45000
 })
 
 pool.on('error', (err) => {
