@@ -72,3 +72,37 @@ test('Drive Lock logic: identifies dead PID worker from locked_by string', () =>
   assert.equal(isDead, true)
 })
 
+test('Drive Shortcut logic: sorts primary documents before shortcuts', () => {
+  const SHORTCUT_MIME = 'application/vnd.google-apps.shortcut'
+  const items = [
+    { id: '1', mimeType: SHORTCUT_MIME },
+    { id: '2', mimeType: 'application/vnd.google-apps.document' },
+    { id: '3', mimeType: SHORTCUT_MIME },
+    { id: '4', mimeType: 'application/vnd.google-apps.document' }
+  ]
+
+  const sorted = [...items].sort((a, b) => {
+    const aIsShortcut = a.mimeType === SHORTCUT_MIME ? 1 : 0
+    const bIsShortcut = b.mimeType === SHORTCUT_MIME ? 1 : 0
+    return aIsShortcut - bIsShortcut
+  })
+
+  assert.equal(sorted[0].id, '2')
+  assert.equal(sorted[1].id, '4')
+  assert.equal(sorted[2].mimeType, SHORTCUT_MIME)
+  assert.equal(sorted[3].mimeType, SHORTCUT_MIME)
+})
+
+test('Drive Shortcut logic: identifies duplicate shortcut targetId', () => {
+  const processedTargetIds = new Set(['target-doc-999'])
+  const shortcutFile = {
+    id: 'shortcut-abc',
+    name: 'Company X - Notes by Gemini',
+    mimeType: 'application/vnd.google-apps.shortcut',
+    shortcutDetails: { targetId: 'target-doc-999' }
+  }
+
+  const isDuplicate = processedTargetIds.has(shortcutFile.shortcutDetails.targetId)
+  assert.equal(isDuplicate, true)
+})
+

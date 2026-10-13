@@ -596,12 +596,23 @@ export async function runDriveIngest(options = {}) {
     const skipReasons = {
       success: 0,
       processing: 0,
-      unsupported: 0
+      unsupported: 0,
+      duplicate_shortcut: 0
     }
     let staleRecovered = 0
     const shouldTrash = process.env.DRIVE_TRASH_PROCESSED_FILES === 'true'
 
-    for (const file of files) {
+    // Sort files so that primary documents are processed before shortcuts.
+    // This allows shortcut deduplication to link directly to already-processed target documents.
+    const sortedFiles = [...files].sort((a, b) => {
+      const aIsShortcut = a.mimeType === SHORTCUT_MIME ? 1 : 0
+      const bIsShortcut = b.mimeType === SHORTCUT_MIME ? 1 : 0
+      return aIsShortcut - bIsShortcut
+    })
+
+    const processedTargetIds = new Set()
+
+    for (const file of sortedFiles) {
       let tracking = trackingMap.get(file.id)
 
       if (!tracking) {
@@ -620,10 +631,32 @@ export async function runDriveIngest(options = {}) {
       const shouldProcess = effectiveStatus === 'pending' || effectiveStatus === 'failed'
       if (!shouldProcess) {
         skipped++
-        if (effectiveStatus === 'success') skipReasons.success++
+        if (effectiveStatus === 'success') {
+          skipReasons.success++
+          processedTargetIds.add(file.id)
+          if (file.shortcutDetails?.targetId) {
+            processedTargetIds.add(file.shortcutDetails.targetId)
+          }
+        }
         else if (effectiveStatus === 'processing') skipReasons.processing++
         else skipReasons.unsupported++
         continue
+      }
+
+      // Shortcut deduplication: if this is a shortcut and its target document is already in meetings or already processed
+      if (file.mimeType === SHORTCUT_MIME && file.shortcutDetails?.targetId) {
+        const targetId = file.shortcutDetails.targetId
+        const existingMeeting = await sql`
+          SELECT company FROM meetings WHERE drive_file_id = ${targetId} LIMIT 1
+        `
+        if (existingMeeting.length > 0 || processedTargetIds.has(targetId)) {
+          const companyName = existingMeeting[0]?.company || null
+          console.log(`[driveIngest] Shortcut "${file.name}" targets already-ingested document (${targetId}). Linking without duplicate processing.`)
+          await markSuccess(file, companyName)
+          processed++
+          skipReasons.duplicate_shortcut = (skipReasons.duplicate_shortcut || 0) + 1
+          continue
+        }
       }
 
       try {
@@ -632,6 +665,10 @@ export async function runDriveIngest(options = {}) {
         if (result.status === 'processed') {
           await markSuccess(file, result.companyName)
           processed++
+          processedTargetIds.add(file.id)
+          if (file.shortcutDetails?.targetId) {
+            processedTargetIds.add(file.shortcutDetails.targetId)
+          }
 
           if (shouldTrash) {
             try {
